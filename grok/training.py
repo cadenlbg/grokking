@@ -8,6 +8,7 @@ import math
 import os
 import sys
 import pickle
+from tqdm import tqdm
 from argparse import ArgumentParser, Namespace
 from functools import reduce
 from typing import Any, Dict, List, Optional, Tuple, Union
@@ -78,14 +79,21 @@ class TrainableTransformer:
         self.logdir = hparams.logdir
         self.checkpoint_path = os.path.join(self.logdir, "checkpoints")
         os.makedirs(self.checkpoint_path, exist_ok=True)
-        os.makedirs(os.path.join(self.logdir, "inputs", "train"), exist_ok=True)
-        os.makedirs(os.path.join(self.logdir, "inputs", "val"), exist_ok=True)
-        os.makedirs(os.path.join(self.logdir, "outputs", "train"), exist_ok=True)
-        os.makedirs(os.path.join(self.logdir, "outputs", "val"), exist_ok=True)
-        
+        os.makedirs(os.path.join(self.logdir,"my_experiments", "ex_inputs", "train"), exist_ok=True)
+        os.makedirs(os.path.join(self.logdir,"my_experiments", "ex_inputs", "val"), exist_ok=True)
+        os.makedirs(os.path.join(self.logdir,"my_experiments", "ex_outputs", "train"), exist_ok=True)
+        os.makedirs(os.path.join(self.logdir,"my_experiments", "ex_outputs", "val"), exist_ok=True)
         # 日志文件
-        self.log_file = os.path.join(self.logdir, "metrics.csv")
+        pct = f"{hparams.train_data_pct}".replace(".", "p")
+        max_step = f"{hparams.max_steps}"
+        operator = hparams.math_operator.replace("+", "plus").replace("-", "minus").replace("*", "mul")
+        filename = f"metrics_pct{pct}_maxstep{max_step}_operator{operator}.csv"
+        
+        log_dir = os.path.join(self.logdir, "metrics")
+        os.makedirs(log_dir, exist_ok=True)
+        self.log_file = os.path.join(log_dir, filename)
         self._init_log_file()
+
 
     @staticmethod
     def add_model_specific_args(parser: ArgumentParser) -> ArgumentParser:
@@ -433,7 +441,7 @@ class TrainableTransformer:
             with open(pickle_file, "wb") as fh:
                 torch.save(output, fh)
 
-    def training_epoch(self, train_loader: ArithmeticIterator, optimizer: torch.optim.Optimizer, scheduler: LambdaLR) -> Dict[str, Any]:
+    def training_epoch(self, train_loader: ArithmeticIterator, optimizer: torch.optim.Optimizer, scheduler: LambdaLR,global_pbar: tqdm) -> Dict[str, Any]:
         """
         执行一个训练epoch
         """
@@ -463,6 +471,13 @@ class TrainableTransformer:
             scheduler.step()
             self.global_step += 1
             
+            global_pbar.set_postfix({
+                "epoch": self.current_epoch,
+                "step": self.global_step,
+                "loss": f"{loss.item():.4f}"  # 实时显示当前batch的loss
+            })
+            global_pbar.update(1)  # 每处理1个batch，进度+1
+
             # 累积损失和准确率
             if epoch_is_to_be_logged:
                 total_train_loss += (coeff * loss).item()
@@ -620,32 +635,29 @@ class TrainableTransformer:
         }
         torch.save(init_checkpoint, os.path.join(self.checkpoint_path, "init.pt"))
         
-        # 训练循环
-        while self.global_step < self.hparams.max_steps:
-            print(f"Epoch {self.current_epoch}, Global Step {self.global_step}")
-            
-            # 训练epoch
-            train_logs = self.training_epoch(train_loader, optimizer, scheduler)
-            
-            # 验证epoch
-            val_logs = self.validation_epoch(val_loader)
-            
-            # 合并日志并保存
-            all_logs = {
-                "epoch": self.current_epoch,
-                "global_step": self.global_step,
-                **train_logs,
-                **val_logs
-            }
-            self._log_metrics(all_logs)
-            
-            # 打印进度
-            print(f"Train Loss: {all_logs.get('train_loss', 'N/A'):.4f}, "
-                  f"Train Acc: {all_logs.get('train_accuracy', 'N/A'):.2f}%, "
-                  f"Val Loss: {all_logs.get('val_loss', 'N/A'):.4f}, "
-                  f"Val Acc: {all_logs.get('val_accuracy', 'N/A'):.2f}%")
-            
-            self.current_epoch += 1
+        total_steps = self.hparams.max_steps
+        pbar = tqdm(total=total_steps, desc="Training", unit="step")
+
+        try:
+            # 训练循环
+            while self.global_step < self.hparams.max_steps:
+                # 训练epoch
+                train_logs = self.training_epoch(train_loader, optimizer, scheduler,pbar)
+                
+                # 验证epoch
+                val_logs = self.validation_epoch(val_loader)
+                
+                # 合并日志并保存
+                all_logs = {
+                    "epoch": self.current_epoch,
+                    "global_step": self.global_step,
+                    **train_logs,
+                    **val_logs
+                }
+                self._log_metrics(all_logs)
+                self.current_epoch += 1
+        finally:
+            pbar.close()
 
     def test(self) -> Dict[str, Any]:
         """
