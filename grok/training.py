@@ -79,10 +79,7 @@ class TrainableTransformer:
         self.logdir = hparams.logdir
         self.checkpoint_path = os.path.join(self.logdir, "checkpoints")
         os.makedirs(self.checkpoint_path, exist_ok=True)
-        os.makedirs(os.path.join(self.logdir,"my_experiments", "ex_inputs", "train"), exist_ok=True)
-        os.makedirs(os.path.join(self.logdir,"my_experiments", "ex_inputs", "val"), exist_ok=True)
-        os.makedirs(os.path.join(self.logdir,"my_experiments", "ex_outputs", "train"), exist_ok=True)
-        os.makedirs(os.path.join(self.logdir,"my_experiments", "ex_outputs", "val"), exist_ok=True)
+
         # 日志文件
         pct = f"{hparams.train_data_pct}".replace(".", "p")
         max_step = f"{hparams.max_steps}"
