@@ -8,12 +8,13 @@ import math
 import os
 import sys
 import pickle
+import yaml
 from tqdm import tqdm
 from argparse import ArgumentParser, Namespace
 from functools import reduce
 from typing import Any, Dict, List, Optional, Tuple, Union
+from pathlib import Path
 import time
-
 import numpy as np
 import torch
 import torch.nn.functional as F
@@ -33,6 +34,14 @@ from grok.measure import get_sharpness
 
 DEFAULT_LOG_DIR = "logs"
 
+def save_hparams(hparams: Namespace, save_path: str) -> None:
+    """将超参数保存为YAML文件"""
+    # 创建保存目录（如果不存在）
+    Path(os.path.dirname(save_path)).mkdir(parents=True, exist_ok=True)
+    # 将Namespace转换为字典并保存
+    with open(save_path, "w") as f:
+        yaml.dump(vars(hparams), f, sort_keys=False)
+    print(f"超参数已保存至: {save_path}")
 
 class TrainableTransformer:
     """
@@ -753,6 +762,9 @@ def train(hparams: Namespace) -> None:
         hparams.d_model,
     )
     hparams.d_key = hparams.d_model / hparams.n_heads
+
+    hparams_save_path = os.path.join(hparams.logdir, "hparams.yaml")
+    save_hparams(hparams, hparams_save_path)
 
     # Set up the RNGs for repeatability
     if hparams.random_seed != -1:
