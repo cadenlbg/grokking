@@ -79,14 +79,20 @@ def load_expt_metrics(
             if row["train_loss"] != "":
                 for k in train_data:
                     if k in ["step", "epoch"]:
-                        v = int(row[k])
+                        if k=="epoch" and row[k]=="":
+                            v=int(row["step"])//2
+                        else:
+                            v = int(row[k])
                     else:
                         v = float(row[k])
                     train_data[k].append(v)
             else:
                 for k in val_data:
                     if k in ["step", "epoch"]:
-                        v = int(row[k])
+                        if k=="epoch" and row[k]=="":
+                            v=int(row["step"])//2
+                        else:
+                            v = int(row[k])
                     else:
                         v = float(row[k])
                     val_data[k].append(v)
@@ -115,6 +121,13 @@ def load_run_metrics(
             train_data_pct = expt_data["hparams"]["train_data_pct"]
             metric_data[train_data_pct] = expt_data
         except FileNotFoundError:
+            print(f"【错误】{expt_dir} 目录下缺少 default/version_0/hparams.yaml 或 metrics.csv")
+            pass
+        except KeyError as e:
+            print(f"【错误】{expt_dir} 的 hparams.yaml 中缺少字段：{e}")
+            pass
+        except Exception as e:
+            print(f"【错误】加载 {expt_dir} 失败，原因：{type(e).__name__} - {e}")
             pass
     return metric_data
 
@@ -482,7 +495,7 @@ try:
             max_increment=i,
         )
 
-    # make a video
+    '''# make a video
     in_files = os.path.join(
         args.output_dir,
         "max_accuracy",
@@ -504,7 +517,7 @@ try:
         "yuv420p",
         out_file,
     ]
-    subprocess.check_call(cmd)
+    subprocess.check_call(cmd)'''
 
 except BaseException as e:
     print(f"{rundir} failed: {e}")

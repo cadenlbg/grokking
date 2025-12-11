@@ -72,6 +72,15 @@ def get_sharpness(data_loader, model, subspace_dim=10, epsilon=1e-3, maxiter=10)
         https://github.com/wenwei202/smoothout
         https://github.com/keras-team/keras/pull/3064
     """
+    """
+    计算权重空间锐度（Keskar et. al. 2016 Sec 2.2.2）
+    参数：
+        data_loader: 数据集加载器
+        model: 待评估的PyTorch模型
+        subspace_dim: 随机子空间维度（0=全空间，降低计算量）
+        epsilon: 邻域大小超参数（控制搜索范围）
+        maxiter: L-BFGS-B优化最大迭代次数
+    """
 
     x0 = get_weights(model)
 
@@ -137,3 +146,4 @@ def get_sharpness(data_loader, model, subspace_dim=10, epsilon=1e-3, maxiter=10)
         x_start += param_idx
 
     return phi
+# phi 越低 → 模型泛化能力越好,可以诊断模型过拟合(phi高) / 欠拟合(phi低)

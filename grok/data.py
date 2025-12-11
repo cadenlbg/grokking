@@ -9,18 +9,21 @@ from torch import Tensor, LongTensor
 import numpy as np
 from typing import Tuple, List, Dict, Any, Union, Optional
 from tqdm import tqdm
+from concurrent.futures import ProcessPoolExecutor
 
 from sympy.combinatorics.permutations import Permutation
 from mod import Mod
 
 import blobfile as bf
 
-
+#先给出所有支持的操作符及其名称
 VALID_OPERATORS = {
+    # 加减乘除
     "+": "addition",
     "-": "subtraction",
     "*": "muliplication",
     "/": "division",
+    # 幂运算和多项式
     "**2+": "squarepoly",
     "**3+": "cubepoly",
     "x**2+y**2_mod_97": "quad1",
@@ -28,24 +31,30 @@ VALID_OPERATORS = {
     "x**2+y**2+x*y+x_mod_97": "quad3",
     "x**3+x*y_mod_97": "cube1",
     "x**3+x*y**2+y_mod_97": "cube2",
+    # 混合运算
     "(x._value//y)if(y._value%2==1)else(x-y)_mod_97": "mix1",
+    # 对称S5群的置换运算
     "s5": "s5",
     "s5conj": "s5conj",
     "s5aba": "s5aba",
+    # 奇偶分支运算
     "+*": "even-addition_odd-multiplication",
     "+-": "even-addition_odd-subtraction",
+    # 列表运算
     "sort": "sort",
     "reverse": "reverse",
     "copy": "copy",
 }
+#序列开始结束标记,=,模数97,数字列表
 EOS_TOKEN = "<|eos|>"
 EQ_TOKEN = "="
 MODULUS = 97
 NUMS = list(range(MODULUS))
 
+#默认数据目录
 DEFAULT_DATA_DIR = "data"
 
-
+# 把不同操作数或对象渲染成字符串
 def render(operand, join_str=""):
     if (
         isinstance(operand, list)
@@ -60,24 +69,29 @@ def render(operand, join_str=""):
     else:
         return str(operand)
 
-
+#调用以下函数生成数据文件
 def create_data_files(data_dir: str = DEFAULT_DATA_DIR):
     ArithmeticTokenizer.create_token_file(data_dir)
     ArithmeticDataset.create_dataset_files(data_dir)
 
-
+# 词法分析器类,用于存储token文本到token id的映射并进行转换
 class ArithmeticTokenizer:
     """Stores the list of token text to token id mappings and converts between them"""
-
+    ''' 初始化流程：
+        1. 确定词汇表文件路径
+        → 2. 调用get_tokens()生成词汇表（itos）
+         → 3. 基于itos构建反向映射stoi。'''
+    
     token_file = "tokens.txt"
 
     def __init__(self, data_dir=DEFAULT_DATA_DIR) -> None:
         self.token_file = bf.join(data_dir, self.token_file)
-
+        # 列表: token id到token文本的映射
         self.itos = self.get_tokens()
-
+        # 字典: token文本到token id的映射
         self.stoi: Dict[str, int] = dict([(s, i) for i, s in enumerate(self.itos)])
-
+    
+    # 正向翻译: 文本→id
     def _encode(self, s: str) -> Tensor:
         return LongTensor([self.stoi[t] for t in s.split(" ")])
 
@@ -95,7 +109,8 @@ class ArithmeticTokenizer:
             return torch.stack([self._encode(s) for s in obj], dim=0)
         else:
             raise NotImplementedError
-
+    
+    # 反向翻译: id→文本
     def decode(self, tensor: Tensor, with_brackets: bool = False) -> str:
         """
         Convert a tensor of token ids into a string of text
@@ -122,6 +137,7 @@ class ArithmeticTokenizer:
         return len(self.itos)
 
     @classmethod
+    # 构建“全量覆盖”的词汇表
     def get_tokens(cls):
         tokens = (
             [EOS_TOKEN, EQ_TOKEN]
@@ -136,6 +152,7 @@ class ArithmeticDataset:
     """A Dataset of arithmetic equations"""
 
     @classmethod
+    # 创建训练集和验证集
     def splits(
         cls,
         train_pct: float,
@@ -153,18 +170,20 @@ class ArithmeticDataset:
         """
 
         assert (0 < train_pct) and (train_pct < 100)
-
+        #生成名称
         ds_name = cls.get_dsname(operator, operand_length)
+        #生成所有等式
         eqs = cls.make_data(operator, operand_length)
-
+        #计算train_set和val_set的划分长度
         train_rows, _ = cls.calc_split_len(train_pct, len(eqs))
-
+        #初始化train_set和val_set实例
         train_ds = cls(ds_name, eqs[:train_rows], train=True, data_dir=data_dir)
         val_ds = cls(ds_name, eqs[train_rows:], train=False, data_dir=data_dir)
 
         return train_ds, val_ds
 
     @classmethod
+    # 计算训练集和验证集的划分长度
     def calc_split_len(cls, train_pct, ds_len):
         train_rows = round(ds_len * (train_pct / 100.0))
         val_rows = ds_len - train_rows
@@ -174,6 +193,13 @@ class ArithmeticDataset:
         """
         :param data: A list of equations strings. Each equation must have an '=' in it.
         """
+        """
+        :param name: 数据集名称（如"addition"）
+        :param data: 输入数据（等式文本列表 或 Token ID张量）
+        :param train: 是否为训练集（影响后续迭代器的洗牌逻辑）
+        :param data_dir: 分词器词汇表存储路径
+    """
+
         self.tokenizer = ArithmeticTokenizer(data_dir)
         self.name = name
         self.train = train
@@ -198,6 +224,7 @@ class ArithmeticDataset:
 
     @classmethod
     def _make_binary_operation_data(cls, operator: str, operands=None) -> List[str]:
+        #先生成所有运算数
         if operator == "s5":
             operands = operands or list(range(5))
             elems = map(np.array, itertools.permutations(operands))
@@ -309,6 +336,7 @@ class ArithmeticDataset:
     #    return eqs
 
     @classmethod
+    #生成标准化数据集名称（如“addition_length-2_noise-50”），用于数据集文件命名和管理。
     def get_dsname(cls, operator, operand_length) -> str:
         operator, noise_level = cls._get_operator_and_noise_level(operator)
         ds_name = VALID_OPERATORS[operator]
@@ -319,12 +347,14 @@ class ArithmeticDataset:
         return ds_name
 
     @classmethod
+    # 生成数据集文件路径和名称
     def get_file_path(cls, operator, operand_length=None, data_dir=DEFAULT_DATA_DIR):
         ds_name = cls.get_dsname(operator, operand_length)
         ds_file = bf.join(data_dir, f"{ds_name}_data.txt")
         return ds_file, ds_name
 
     @classmethod
+    # 解析运算类型字符串，提取噪声注入级别
     def _get_operator_and_noise_level(cls, operator):
         if "_noisy" in operator:
             operator, noise_level = operator.split("_noisy_")
@@ -333,19 +363,23 @@ class ArithmeticDataset:
             return operator, 0
 
     @classmethod
+    #功能：接收运算类型，自动判断调用“二元运算生成”或“一元运算生成”方法，同时支持数据洗牌、噪声注入，返回带EOS标记的等式列表。
     def make_data(cls, operator, operands=None, shuffle=True, seed=0) -> List[str]:
         operator, noise_level = cls._get_operator_and_noise_level(operator)
         assert operator in VALID_OPERATORS
-
+        
+        # 根据运算类型调用相应的数据生成方法
         if operator not in ["sort", "reverse", "copy"]:
             data = cls._make_binary_operation_data(operator)
         else:
             data = cls._make_unary_operation_data(operator, operands)
-
+        
+        # 数据洗牌
         rng = np.random.RandomState(seed=seed)
         if shuffle:
             rng.shuffle(data)
-
+        
+        # 噪声注入
         if noise_level > 0:
             random_answer_eqns = rng.choice(data, size=noise_level)
             random_answers = [
@@ -353,7 +387,8 @@ class ArithmeticDataset:
             ]
             for i in range(noise_level):
                 data[i] = data[i].split(" = ")[0] + " = " + random_answers[i]
-
+        
+        # 添加EOS标记
         data = [EOS_TOKEN + " " + eq + " " + EOS_TOKEN for eq in data]
 
         return data
@@ -376,6 +411,7 @@ class ArithmeticDataset:
     #        fh.writelines([EOS_TOKEN + " " + eq + " " + EOS_TOKEN + "\n" for eq in eqs])
 
     @classmethod
+    # 构建所有可能的数字列表组合生成列表操作数（如长度为2的数字排列列表），为一元运算提供输入数据。
     def _make_lists(cls, sizes=[2, 3], nums=NUMS):
         lists: dict = {}
         for size in sizes:

@@ -16,9 +16,6 @@ import time
 import numpy as np
 import torch
 import torch.nn.functional as F
-from pytorch_lightning import LightningModule, Trainer
-from pytorch_lightning.callbacks import Callback, ModelCheckpoint
-from pytorch_lightning.loggers import CSVLogger
 from torch import Tensor
 from torch.optim.lr_scheduler import LambdaLR
 
@@ -36,9 +33,10 @@ from grok.measure import get_sharpness
 DEFAULT_LOG_DIR = "logs"
 
 
-class TrainableTransformer(LightningModule):
+class TrainableTransformer:
     """
     Adds training methods to train a generic transformer on arithmetic equations
+    (纯PyTorch实现，无PyTorch Lightning依赖)
     """
 
     def __init__(self, hparams: Namespace) -> None:
@@ -46,8 +44,9 @@ class TrainableTransformer(LightningModule):
         :param hparams: An argparse.Namespace with parameters defined in
                         self.add_model_specific_args().
         """
-        super().__init__()
-        self.hparams = hparams  # type: ignore
+        self.hparams = hparams
+        self.device = torch.device(f"cuda:{hparams.gpu}" if torch.cuda.is_available() and hparams.gpu >= 0 else "cpu")
+        
         self.prepare_data()
 
         self.transformer = Transformer(
@@ -59,11 +58,34 @@ class TrainableTransformer(LightningModule):
             len(self.train_dataset.tokenizer),
             hparams.non_linearity,
             weight_noise=self.hparams.weight_noise,
-        )
+        ).to(self.device)
 
-        self.margin = torch.Tensor([0])
+        self.transformer = self.transformer.float()  # 转换可学习参数为 float32
+        for buffer in self.transformer.buffers():  # 转换所有 buffer 为 float32
+            buffer.data = buffer.data.float()
+
+        self.margin = torch.Tensor([0]).to(self.device)
         self.next_epoch_to_eval = -1
         self.next_train_epoch_to_log = 0
+        
+        # 初始化训练相关变量
+        self.train_batchsize = 0
+        self.batches_per_epoch = 0
+        self.current_epoch = 0
+        self.global_step = 0
+        
+        # 日志和检查点相关
+        self.logdir = hparams.logdir
+        self.checkpoint_path = os.path.join(self.logdir, "checkpoints")
+        os.makedirs(self.checkpoint_path, exist_ok=True)
+        os.makedirs(os.path.join(self.logdir, "inputs", "train"), exist_ok=True)
+        os.makedirs(os.path.join(self.logdir, "inputs", "val"), exist_ok=True)
+        os.makedirs(os.path.join(self.logdir, "outputs", "train"), exist_ok=True)
+        os.makedirs(os.path.join(self.logdir, "outputs", "val"), exist_ok=True)
+        
+        # 日志文件
+        self.log_file = os.path.join(self.logdir, "metrics.csv")
+        self._init_log_file()
 
     @staticmethod
     def add_model_specific_args(parser: ArgumentParser) -> ArgumentParser:
@@ -79,7 +101,6 @@ class TrainableTransformer(LightningModule):
         parser.add_argument(
             "--batchsize",
             type=float,
-            # default=0.25,
             default=0,
             help="-1 -> entire dataset, 0 -> auto-calculate, 0<N<1 -> fraction of dataset, N>1 -> N",
         )
@@ -132,70 +153,58 @@ class TrainableTransformer(LightningModule):
 
     def prepare_data(self) -> None:
         """
-        Used by pytorch_lighting
-
         Loads training data to self.train_dataset
         Loads validation data to self.val_dataset
         """
         (self.train_dataset, self.val_dataset,) = ArithmeticDataset.splits(
-            train_pct=self.hparams.train_data_pct,  # type: ignore
-            operator=self.hparams.math_operator,  # type: ignore
-            operand_length=self.hparams.operand_length,  # type: ignore
-            data_dir=self.hparams.datadir,  # type: ignore
+            train_pct=self.hparams.train_data_pct,
+            operator=self.hparams.math_operator,
+            operand_length=self.hparams.operand_length,
+            data_dir=self.hparams.datadir,
         )
 
-    def train_dataloader(self) -> ArithmeticIterator:  # type: ignore
+    def train_dataloader(self) -> ArithmeticIterator:
         """
-        Used by pytorch_lighting
-
         :returns: an iterator for self.train_dataset
         """
-        device = self.transformer.embedding.weight.device
         iterator = ArithmeticIterator(
             self.train_dataset,
-            device,
-            batchsize_hint=self.hparams.batchsize,  # type: ignore
+            self.device,
+            batchsize_hint=self.hparams.batchsize,
         )
         self.train_batchsize = iterator.batchsize
         self.batches_per_epoch = len(iterator)
 
         return iterator
 
-    def val_dataloader(self) -> ArithmeticIterator:  # type: ignore
+    def val_dataloader(self) -> ArithmeticIterator:
         """
-        Used by pytorch_lighting
-
-        :returns: an iterator for self.train_dataset
+        :returns: an iterator for self.val_dataset
         """
-        device = self.transformer.embedding.weight.device
         iterator = ArithmeticIterator(
             self.val_dataset,
-            device,
+            self.device,
             batchsize_hint=-1,  # no need to batch validation data
         )
         return iterator
 
-    def test_dataloader(self) -> ArithmeticIterator:  # type: ignore
+    def test_dataloader(self) -> ArithmeticIterator:
         """
-        Used by pytorch_lighting
-
-        :returns: an iterator for self.train_dataset
+        :returns: an iterator for self.val_dataset
         """
-        device = self.transformer.embedding.weight.device
         iterator = ArithmeticIterator(
-            self.val_dataset, device, batchsize_hint=-1  # type: ignore
+            self.val_dataset, self.device, batchsize_hint=-1
         )
         return iterator
 
     def _scheduler_lr(self, step: int) -> float:
         """
-        Used by pytorch_lighting
-
         :returns: the learning_rate for this training step
         """
-        max_lr = self.hparams.max_lr  # type: ignore
-        min_lr = self.hparams.max_lr / 10  # type: ignore
-        warmup_steps = self.hparams.warmup_steps  # type: ignore
+        max_lr = self.hparams.max_lr
+        min_lr = self.hparams.max_lr / 10
+        warmup_steps = self.hparams.warmup_steps
+        
         if not self.hparams.anneal_lr:
             if step <= warmup_steps:
                 lr = (float(step) / max(warmup_steps, 1)) * max_lr
@@ -209,44 +218,26 @@ class TrainableTransformer(LightningModule):
                 t = effective_step / self.hparams.anneal_lr_steps
                 cos = (1 + np.cos(np.pi * t)) / 2
                 lr = min_lr + (max_lr - min_lr) * cos
-                # lr = max_lr - ((effective_step / max_effective_step) * (max_lr - min_lr))
             else:
                 lr = min_lr
         return lr
 
-    def configure_optimizers(self) -> Tuple[List[Any], List[Dict]]:
+    def configure_optimizers(self) -> Tuple[torch.optim.Optimizer, LambdaLR]:
         """
-        Used by pytorch_lighting
-
-        :returns: optimizers and schedulers.
+        :returns: optimizer and scheduler
         """
         optimizer = CustomAdamW(
-            self.parameters(),
+            self.transformer.parameters(),
             betas=(0.9, 0.98),
             eps=1e-8,
-            lr=1,
+            lr=1,  # 由scheduler控制实际学习率
             weight_decay=self.hparams.weight_decay,
             noise_factor=self.hparams.noise_factor,
             weight_decay_form=self.hparams.weight_decay_kind,
         )
-        # optimizer = SAM(
-        #     self.parameters(),
-        #     base_optimizer=CustomAdamW,
-        #     rho=0.05,
-        #     betas=(0.9, 0.98),
-        #     eps=1e-8,
-        #     lr=1,
-        #     weight_decay=self.hparams.weight_decay,
-        #     noise_factor=self.hparams.noise_factor,
-        # )
-        schedulers = [
-            {
-                "scheduler": LambdaLR(optimizer, lr_lambda=self._scheduler_lr),
-                "interval": "step",
-                "frequency": 1,
-            }
-        ]
-        return [optimizer], schedulers
+        
+        scheduler = LambdaLR(optimizer, lr_lambda=self._scheduler_lr)
+        return optimizer, scheduler
 
     def _accuracy(self, y_hat: Tensor, y: Tensor) -> Tensor:
         """
@@ -259,7 +250,6 @@ class TrainableTransformer(LightningModule):
                   equation in the batch
         :returns: the fraction of equations correctly answered
         """
-
         # find max prediction from output
         y_hat = torch.max(y_hat, dim=-2).indices  # batchsize x num_rhs_tokens
         row_accuracy = torch.min((y_hat == y), dim=-1).values  # shape: batchsize
@@ -273,7 +263,7 @@ class TrainableTransformer(LightningModule):
         train: bool = True,
         reduction: str = "mean",
         grads: bool = False,
-    ) -> Tuple[Tensor, Tensor, float, Tensor, Tensor, Tensor, Tensor]:
+    ) -> Tuple[Tensor, ...]:
         """
         Performs one forward pass on a training or validation batch
 
@@ -287,89 +277,103 @@ class TrainableTransformer(LightningModule):
                   The softmax probilities for the solutions to the equations
                   A list lists of attention matrices by layer and head
                   A list lists of value matrices by layer and head
-                  Margin for this batch
         """
         x = batch["text"]  # shape = batchsize * context_len
         y = batch["target"]  # shape = batchsize * context_len
-        y_hat, attentions, values = self(
-            x=x, save_activations=self.hparams.save_activations  # type: ignore
-        )  # shape = batchsize * context_len * vocab_size
-        y_hat = y_hat.transpose(-2, -1)  # shape = batchsize * vocab_size * context_len
+        
+        self.transformer.train(train)
+        with torch.set_grad_enabled(train or grads):
+            y_hat, attentions, values = self.transformer(
+                x=x, save_activations=self.hparams.save_activations
+            )  # shape = batchsize * context_len * vocab_size
+            y_hat = y_hat.transpose(-2, -1)  # shape = batchsize * vocab_size * context_len
 
-        # Note: each sample must have exactly one '=' and all of them must
-        # have it in the same position.
-        eq_token_index = self.train_dataset.tokenizer.stoi["="]
-        eq_position_t = torch.nonzero(y[0, :] == eq_token_index, as_tuple=False)
-        eq_position = int(eq_position_t.squeeze())
+            # Note: each sample must have exactly one '=' and all of them must
+            # have it in the same position.
+            eq_token_index = self.train_dataset.tokenizer.stoi["="]
+            eq_position_t = torch.nonzero(y[0, :] == eq_token_index, as_tuple=False)
+            eq_position = int(eq_position_t.squeeze())
 
-        # only calculate loss/accuracy on right hand side of the equation
-        y_rhs = y[..., eq_position + 1 :]
-        y_hat_rhs = y_hat[..., eq_position + 1 :]
-        x_lhs = x[..., : eq_position + 1]
+            # only calculate loss/accuracy on right hand side of the equation
+            y_rhs = y[..., eq_position + 1 :]
+            y_hat_rhs = y_hat[..., eq_position + 1 :]
+            x_lhs = x[..., : eq_position + 1]
 
-        if train:
-            coeff = float(batch["target"].shape[0]) / len(self.train_dataset)
-        else:
-            coeff = float(batch["target"].shape[0]) / len(self.val_dataset)
-        loss = F.cross_entropy(y_hat_rhs, y_rhs, reduction=reduction)
+            if train:
+                coeff = float(batch["target"].shape[0]) / len(self.train_dataset)
+            else:
+                coeff = float(batch["target"].shape[0]) / len(self.val_dataset)
+            loss = F.cross_entropy(y_hat_rhs, y_rhs, reduction=reduction)
 
-        with torch.no_grad():
-            acc = self._accuracy(y_hat_rhs, y_rhs)
-            if reduction == "mean":
-                acc = acc.mean()
+            with torch.no_grad():
+                acc = self._accuracy(y_hat_rhs, y_rhs)
+                if reduction == "mean":
+                    acc = acc.mean()
 
-        """
-        device = self.transformer.embedding.weight.device
-        self.margin = self.margin.to(device)
+            grad_vec = None
+            if grads:
+                loss.backward()
+                for p in self.transformer.parameters():
+                    if p.grad is not None:
+                        p.grad.data.div_(batch["text"].shape[0])
+                        if grad_vec is None:
+                            grad_vec = p.grad.data.view(-1)
+                        else:
+                            grad_vec = torch.cat((grad_vec, p.grad.data.view(-1)))
+                return loss, grad_vec
 
-        output = y_hat_rhs.clone()  # batchsize, vocabsize, rhs tokens
-        output_m = output.clone()  # batchsize, vocabsize, rhs tokens
-        target = y_rhs.clone()  # batchsize, rhs tokens
-
-        for i in range(output.size(0)):  # batch
-            for j in range(output.size(2)):  # rhs tokens
-                output_m[i, target[i, j], j] = output_m[i, :, j].min()
-
-        for i in range(output.size(2)):  # rhs tokens
-            output_compressed = output[:, target[:, i], i].squeeze().diag()
-            output_m_compressed = (
-                output_m[:, output_m.max(dim=1).indices[:, i], i].squeeze().diag()
-            )
-            self.margin = torch.cat(
-                (
-                    self.margin,
-                    (output_compressed - output_m_compressed),
-                ),
-                0,
-            )
-        """
-        grad_vec = None
-        if grads:
-            loss.backward()
-            for p in self.parameters():
-                p.grad.data.div_(batch["text"].shape[0])
-                if grad_vec is None:
-                    grad_vec = p.grad.data.view(-1)
-                else:
-                    grad_vec = torch.cat((grad_vec, p.grad.data.view(-1)))
-            return loss, grad_vec
         return loss, acc, coeff, x_lhs, y_hat_rhs, attentions, values
 
+    def _init_log_file(self):
+        """初始化日志CSV文件"""
+        if not os.path.exists(self.log_file):
+            with open(self.log_file, "w") as f:
+                # 写入CSV表头
+                headers = [
+                    "epoch", "global_step", "train_loss", "train_accuracy", 
+                    "train_perplexity", "learning_rate", "len_train_ds", 
+                    "len_val_ds", "batches_per_epoch", "time_per_epoch",
+                    "fwd_time_in_epoch", "val_loss", "val_accuracy", 
+                    "val_perplexity", "full_train_loss", "full_train_acc"
+                ]
+                # 添加参数范数的表头
+                for name, _ in self.transformer.named_parameters():
+                    headers.append(f"paramnorm_{name}")
+                f.write(",".join(headers) + "\n")
 
-    def _save_inputs(self, outputs: Dict, ds: str) -> None:
+    def _log_metrics(self, metrics_dict: Dict[str, Any]):
+        """将指标写入日志文件"""
+        # 确保所有指标都有值，没有的用NaN填充
+        all_headers = []
+        with open(self.log_file, "r") as f:
+            all_headers = f.readline().strip().split(",")
+        
+        values = []
+        for header in all_headers:
+            if header in metrics_dict:
+                val = metrics_dict[header]
+                if isinstance(val, Tensor):
+                    val = val.item()
+                elif isinstance(val, np.ndarray):
+                    val = val.item()
+                values.append(str(val))
+            else:
+                values.append("NaN")
+        
+        with open(self.log_file, "a") as f:
+            f.write(",".join(values) + "\n")
+
+    def _save_inputs(self, x_lhs: Tensor, ds: str) -> None:
         """
         Saves the input equations to disk for analysis later
 
-        :param outputs: a list of tuples from self.training_step()
+        :param x_lhs: 输入的左侧表达式张量
         :param ds: a string ('train' or 'val') naming which dataset
-                   these inputs are from.
-        :param train: True is this is a training batch, false otherwise
         """
-        logdir = self.hparams.logdir + "/inputs/" + ds  # type: ignore
+        logdir = os.path.join(self.logdir, "inputs", ds)
         os.makedirs(logdir, exist_ok=True)
-        pickle_file = logdir + f"/{ds}.pt"
+        pickle_file = os.path.join(logdir, f"{ds}.pt")
 
-        x_lhs = torch.cat([x["x_lhs"] for x in outputs])
         with open(pickle_file, "wb") as fh:
             torch.save(x_lhs, fh)
 
@@ -384,7 +388,6 @@ class TrainableTransformer(LightningModule):
                                    (lists of lists of activations by layer and head)
         :returns: A lists of lists of activations by layer and head
         """
-        # num_batches = len(partial_activations)
         num_layers = len(partial_activations[0])
         num_heads = len(partial_activations[0][0])
         activations: List = []
@@ -396,7 +399,6 @@ class TrainableTransformer(LightningModule):
         for minibatch_activations in partial_activations:
             for l, layer_activations in enumerate(minibatch_activations):
                 for h, head_attn in enumerate(layer_activations):
-                    # # print(f"head_attn = {head_attn}")
                     activations[l][h].append(head_attn)
 
         for l in range(num_layers):
@@ -405,265 +407,320 @@ class TrainableTransformer(LightningModule):
 
         return activations
 
-    def _save_activations(self, outputs: Dict, ds: str) -> None:
+    def _save_activations(self, outputs: List[Dict[str, Any]], ds: str) -> None:
         """
         Saves activations out to disk for analysis later
 
-        :param outputs: a list of tuples from self.training_step()
+        :param outputs: a list of dicts from training/validation step
+        :param ds: 'train' or 'val'
         """
-
         output: Dict[str, Any] = {}
-        if self.hparams.save_outputs:  # type: ignore
+        if self.hparams.save_outputs:
             y_hat_rhs = torch.cat([x["y_hat_rhs"] for x in outputs])
             output["y_hat_rhs"] = y_hat_rhs
-        if self.hparams.save_activations:  # type: ignore
-            partial_attentions = list([o["partial_attentions"] for o in outputs])
+        if self.hparams.save_activations:
+            partial_attentions = [o["partial_attentions"] for o in outputs]
             attentions = self._merge_batch_activations(partial_attentions)
-            partial_values = list([o["partial_values"] for o in outputs])
+            partial_values = [o["partial_values"] for o in outputs]
             values = self._merge_batch_activations(partial_values)
             output["attentions"] = attentions
             output["values"] = values
-        if self.hparams.save_outputs or self.hparams.save_activations:  # type: ignore
-            logdir = self.hparams.logdir + "/outputs/" + ds  # type: ignore
+        
+        if self.hparams.save_outputs or self.hparams.save_activations:
+            logdir = os.path.join(self.logdir, "outputs", ds)
             os.makedirs(logdir, exist_ok=True)
-            pickle_file = logdir + f"/epoch_{self.current_epoch:010}.pt"
+            pickle_file = os.path.join(logdir, f"epoch_{self.current_epoch:010}.pt")
             with open(pickle_file, "wb") as fh:
                 torch.save(output, fh)
 
-    def training_step(self, batch, batch_idx):
+    def training_epoch(self, train_loader: ArithmeticIterator, optimizer: torch.optim.Optimizer, scheduler: LambdaLR) -> Dict[str, Any]:
         """
-        Used by pytorch_lightning
-        Runs one forward training pass on one batch
-
-        :param batch: The batch of equations to process
-        :param batch_idx: which batch this is in the epoch.
-        :returns: a dict with loss, accuracy, lr, probabilities of solutions,
-                  attentions, and values
+        执行一个训练epoch
         """
-        if batch_idx == 0:
-            self.training_epoch_start_time = time.time()
-            self.fwd_time_in_epoch = 0
-
-        start = time.time()
-        loss, accuracy, coeff, x_lhs, y_hat_rhs, attentions, values = self._step(
-            batch=batch, batch_idx=batch_idx, train=True
-        )
-        self.fwd_time_in_epoch += time.time() - start
-
-        schedulers = self.trainer.lr_schedulers[0]
-        if self.current_epoch != self.next_train_epoch_to_log:
-            return {"loss": loss}
-        lr = schedulers["scheduler"].optimizer.param_groups[0]["lr"]
-        output = {
-            "loss": loss,
-            "partial_train_loss": coeff * loss,
-            "partial_train_accuracy": coeff * accuracy,
-            "learning_rate": torch.tensor([lr]),
-            "y_hat_rhs": y_hat_rhs,
-            "partial_attentions": attentions,
-            "partial_values": values,
-        }
-        if self.current_epoch == 0:
-            output["x_lhs"] = x_lhs
-
-        return output
-
-    def training_epoch_end(self, outputs):
-        """
-        Used by pytorch_lightning
-        Accumulates results of all forward training passes in this epoch
-
-        :param outputs: a list of dicts from self.training_step()
-        :param batch_idx: which batch this is in the epoch.
-        :returns: a dict with loss, accuracy, lr, probabilities of solutions,
-                  attentions, and values
-        """
+        self.transformer.train()
+        training_epoch_start_time = time.time()
+        fwd_time_in_epoch = 0
+        
+        outputs = []
+        total_train_loss = 0.0
+        total_train_acc = 0.0
+        
         epoch_is_to_be_logged = self.current_epoch == self.next_train_epoch_to_log
+
+        for batch_idx, batch in enumerate(train_loader):
+            start = time.time()
+            
+            # 前向传播
+            loss, accuracy, coeff, x_lhs, y_hat_rhs, attentions, values = self._step(
+                batch=batch, batch_idx=batch_idx, train=True
+            )
+            fwd_time_in_epoch += time.time() - start
+            
+            # 反向传播和优化
+            optimizer.zero_grad()
+            loss.backward()
+            optimizer.step()
+            scheduler.step()
+            self.global_step += 1
+            
+            # 累积损失和准确率
+            if epoch_is_to_be_logged:
+                total_train_loss += (coeff * loss).item()
+                total_train_acc += (coeff * accuracy).item()
+                
+                output_dict = {
+                    "y_hat_rhs": y_hat_rhs,
+                    "partial_attentions": attentions,
+                    "partial_values": values,
+                }
+                if self.current_epoch == 0:
+                    output_dict["x_lhs"] = x_lhs
+                outputs.append(output_dict)
+
+        # 日志记录
+        logs = {}
         if epoch_is_to_be_logged:
             self.next_train_epoch_to_log = max(
                 int(1.01 * self.next_train_epoch_to_log),
                 self.next_train_epoch_to_log + 1,
             )
-            with torch.no_grad():
-                try:
-                    loss = torch.stack([x["partial_train_loss"] for x in outputs]).sum()
-                except Exception as e:
-                    print("!" * 80)
-                    print(outputs)
-                    raise e
-                perplexity = torch.exp(loss)
-                accuracy = torch.stack(
-                    [x["partial_train_accuracy"] for x in outputs]
-                ).sum()
-            # avg_lr = torch.stack([x["learning_rate"] for x in outputs]).mean()
-            # max_lr = torch.stack([x["learning_rate"] for x in outputs]).max()
-            # last_lr = outputs[-1]["learning_rate"]
-            first_lr = outputs[0]["learning_rate"]
-
+            
+            train_loss = torch.tensor(total_train_loss)
+            train_accuracy = torch.tensor(total_train_acc)
+            perplexity = torch.exp(train_loss)
+            lr = scheduler.get_last_lr()[0]
+            
+            # 保存输入和激活
             if self.hparams.save_activations or self.hparams.save_outputs:
                 if self.current_epoch == 0:
-                    self._save_inputs(outputs, ds="train")
+                    all_x_lhs = torch.cat([x["x_lhs"] for x in outputs])
+                    self._save_inputs(all_x_lhs, ds="train")
                 self._save_activations(outputs, ds="train")
-
-            logs = {
-                "train_loss": loss,
-                "train_accuracy": accuracy,
+            
+            logs.update({
+                "train_loss": train_loss,
+                "train_accuracy": train_accuracy,
                 "train_perplexity": perplexity,
-                "learning_rate": first_lr,
+                "learning_rate": lr,
                 "len_train_ds": len(self.train_dataset),
                 "len_val_ds": len(self.val_dataset),
                 "batches_per_epoch": self.batches_per_epoch,
-                "time_per_epoch": time.time() - self.training_epoch_start_time,
-                "fwd_time_in_epoch": self.fwd_time_in_epoch,
-            }
-            for k, v in logs.items():
-                self.log(k, v)
+                "time_per_epoch": time.time() - training_epoch_start_time,
+                "fwd_time_in_epoch": fwd_time_in_epoch,
+            })
 
-    def validation_step(self, batch, batch_idx):
-        """
-        Used by pytorch_lightning
-        Runs one forward validation pass on one batch
+        return logs
 
-        :param batch: The batch of equations to process
-        :param batch_idx: which batch this is in the epoch.
-        :returns: a dict with val_loss, val_accuracy, probabilities of solutions,
-                  attentions, and values
+    def validation_epoch(self, val_loader: ArithmeticIterator) -> Dict[str, Any]:
         """
+        执行一个验证epoch
+        """
+        self.transformer.eval()
+        outputs = []
+        total_val_loss = 0.0
+        total_val_acc = 0.0
+        
         if self.next_epoch_to_eval < self.current_epoch:
             self.next_epoch_to_eval = self.current_epoch
-        if self.current_epoch != self.next_epoch_to_eval:
+        
+        validation_is_real = self.current_epoch == self.next_epoch_to_eval
+        
+        if not validation_is_real:
             return {}
+        
         with torch.no_grad():
-            loss, accuracy, coeff, x_lhs, y_hat_rhs, attentions, values = self._step(
-                batch=batch, batch_idx=batch_idx, train=False
-            )
-        output = {
-            "partial_val_loss": coeff * loss,
-            "partial_val_accuracy": coeff * accuracy,
-            "y_hat_rhs": y_hat_rhs,
-            "partial_attentions": attentions,
-            "partial_values": values,
-        }
-        if self.current_epoch == 0:
-            output["x_lhs"] = x_lhs
-
-        return output
-
-    def validation_epoch_end(self, outputs):
-        """
-        Used by pytorch_lightning
-        Accumulates results of all forward validation passes in this epoch
-
-        :param outputs: a list of dicts from self.validation_step()
-        :param batch_idx: which batch this is in the epoch.
-        :returns: a dict with val_loss, val_accuracy
-        """
-        validation_is_real = len(outputs[0]) != 0
-
-        if validation_is_real:
-            self.next_epoch_to_eval = max(
-                int(1.02 * self.next_epoch_to_eval), self.next_epoch_to_eval + 1
-            )
-
-            loss = torch.stack([x["partial_val_loss"] for x in outputs]).sum()
-            perplexity = torch.exp(loss)
-            accuracy = torch.stack([x["partial_val_accuracy"] for x in outputs]).sum()
-
-            if self.hparams.save_activations or self.hparams.save_outputs:
-                if self.current_epoch == 0:
-                    self._save_inputs(outputs, ds="val")
-                self._save_activations(outputs, ds="val")
-
-            logs = {
-                "val_loss": loss,
-                "val_accuracy": accuracy,
-                "val_perplexity": perplexity,
-            }
-            for name, param in self.named_parameters():
-                # n parameters
-                n_params = param.numel()
-                # get the l2 norm of the parameter
-                logs["paramnorm_" + name] = torch.norm(
-                    param, 2
-                ).detach().cpu().numpy() / np.sqrt(n_params)
-
-            # train accuracy
-            device = self.transformer.embedding.weight.device
-            train_data = self.train_dataset.data.to(device)
-            training_data = {"text": train_data[:, :-1], "target": train_data[:, 1:]}
-            with torch.no_grad():
-                tr_loss, tr_acc, *_ = self._step(training_data, 0)
-                logs["full_train_loss"] = tr_loss
-                logs["full_train_acc"] = tr_acc
-
-            for k, v in logs.items():
-                self.log(k, v)
-        # save a checkpoint if the epoch is a power of 2
-        if (
-            self.current_epoch > 0
-            and int(2 ** (int(np.log(self.current_epoch) / np.log(2))))
-            == self.current_epoch
-        ):
-            self.trainer.save_checkpoint(
-                os.path.join(
-                    self.hparams.checkpoint_path,
-                    "epoch_" + str(self.current_epoch) + ".ckpt",
+            for batch_idx, batch in enumerate(val_loader):
+                loss, accuracy, coeff, x_lhs, y_hat_rhs, attentions, values = self._step(
+                    batch=batch, batch_idx=batch_idx, train=False
                 )
-            )
-        if validation_is_real:
-            return logs
-
-    def test_step(self, batch, batch_idx):
-        """
-        Used by pytorch_lightning
-        Runs one forward validation pass on one batch
-
-        :param batch: The batch of equations to process
-        :param batch_idx: which batch this is in the epoch.
-        :returns: a dict with val_loss, val_accuracy, probabilities of solutions,
-                  attentions, and values
-        """
-
-        loss, accuracy, coeff, x_lhs, y_hat_rhs, attentions, values = self._step(
-            batch=batch, batch_idx=batch_idx, train=False, reduction="none"
+                
+                total_val_loss += (coeff * loss).item()
+                total_val_acc += (coeff * accuracy).item()
+                
+                output_dict = {
+                    "y_hat_rhs": y_hat_rhs,
+                    "partial_attentions": attentions,
+                    "partial_values": values,
+                }
+                if self.current_epoch == 0:
+                    output_dict["x_lhs"] = x_lhs
+                outputs.append(output_dict)
+        
+        # 更新下一次验证的epoch
+        self.next_epoch_to_eval = max(
+            int(1.02 * self.next_epoch_to_eval), self.next_epoch_to_eval + 1
         )
-        output = {
-            "partial_test_loss": coeff * loss,
-            "partial_test_accuracy": coeff * accuracy,
-            "y_hat_rhs": y_hat_rhs,
-            "partial_attentions": attentions,
-            "partial_values": values,
+        
+        # 计算验证指标
+        val_loss = torch.tensor(total_val_loss)
+        val_accuracy = torch.tensor(total_val_acc)
+        val_perplexity = torch.exp(val_loss)
+        
+        # 保存输入和激活
+        if self.hparams.save_activations or self.hparams.save_outputs:
+            if self.current_epoch == 0:
+                all_x_lhs = torch.cat([x["x_lhs"] for x in outputs])
+                self._save_inputs(all_x_lhs, ds="val")
+            self._save_activations(outputs, ds="val")
+        
+        # 计算训练集全量指标
+        train_data = self.train_dataset.data.to(self.device)
+        training_data = {"text": train_data[:, :-1], "target": train_data[:, 1:]}
+        with torch.no_grad():
+            tr_loss, tr_acc, *_ = self._step(training_data, 0, train=False)
+        
+        # 计算参数范数
+        param_norms = {}
+        for name, param in self.transformer.named_parameters():
+            n_params = param.numel()
+            param_norms[f"paramnorm_{name}"] = torch.norm(param, 2).detach().cpu().numpy() / np.sqrt(n_params)
+        
+        logs = {
+            "epoch": self.current_epoch,
+            "global_step": self.global_step,
+            "val_loss": val_loss,
+            "val_accuracy": val_accuracy,
+            "val_perplexity": val_perplexity,
+            "full_train_loss": tr_loss,
+            "full_train_acc": tr_acc,
+            **param_norms
         }
-        if self.current_epoch == 0:
-            output["x_lhs"] = x_lhs
+        
+        # 保存检查点（2的幂次epoch）
+        if (self.current_epoch > 0 and 
+            int(2 ** (int(np.log(self.current_epoch) / np.log(2)))) == self.current_epoch):
+            checkpoint = {
+                "epoch": self.current_epoch,
+                "global_step": self.global_step,
+                "model_state_dict": self.transformer.state_dict(),
+                "hyper_parameters": vars(self.hparams),
+            }
+            checkpoint_file = os.path.join(self.checkpoint_path, f"epoch_{self.current_epoch}.ckpt")
+            torch.save(checkpoint, checkpoint_file)
+        
+        return logs
 
-        return output
-
-    def test_epoch_end(self, outputs):
+    def fit(self) -> None:
         """
-        Used by pytorch_lightning
-        Accumulates results of all forward validation passes in this epoch
-
-        :param outputs: a list of dicts from self.validation_step()
-        :param batch_idx: which batch this is in the epoch.
-        :returns: a dict with val_loss, val_accuracy
+        训练主循环
         """
-        loss = torch.cat([x["partial_test_loss"] for x in outputs], dim=0)  # .sum()
-        # loss = list([x["partial_test_loss"] for x in outputs])  # .sum()
+        # 初始化数据加载器
+        train_loader = self.train_dataloader()
+        val_loader = self.val_dataloader()
+        
+        # 初始化优化器和调度器
+        optimizer, scheduler = self.configure_optimizers()
+        
+        # 保存初始模型
+        init_checkpoint = {
+            "epoch": 0,
+            "global_step": 0,
+            "model_state_dict": self.transformer.state_dict(),
+            "hyper_parameters": vars(self.hparams),
+        }
+        torch.save(init_checkpoint, os.path.join(self.checkpoint_path, "init.pt"))
+        
+        # 训练循环
+        while self.global_step < self.hparams.max_steps:
+            print(f"Epoch {self.current_epoch}, Global Step {self.global_step}")
+            
+            # 训练epoch
+            train_logs = self.training_epoch(train_loader, optimizer, scheduler)
+            
+            # 验证epoch
+            val_logs = self.validation_epoch(val_loader)
+            
+            # 合并日志并保存
+            all_logs = {
+                "epoch": self.current_epoch,
+                "global_step": self.global_step,
+                **train_logs,
+                **val_logs
+            }
+            self._log_metrics(all_logs)
+            
+            # 打印进度
+            print(f"Train Loss: {all_logs.get('train_loss', 'N/A'):.4f}, "
+                  f"Train Acc: {all_logs.get('train_accuracy', 'N/A'):.2f}%, "
+                  f"Val Loss: {all_logs.get('val_loss', 'N/A'):.4f}, "
+                  f"Val Acc: {all_logs.get('val_accuracy', 'N/A'):.2f}%")
+            
+            self.current_epoch += 1
+
+    def test(self) -> Dict[str, Any]:
+        """
+        测试过程
+        """
+        test_loader = self.test_dataloader()
+        self.transformer.eval()
+        
+        all_losses = []
+        all_accuracies = []
+        outputs = []
+        
+        with torch.no_grad():
+            for batch_idx, batch in enumerate(test_loader):
+                loss, accuracy, coeff, x_lhs, y_hat_rhs, attentions, values = self._step(
+                    batch=batch, batch_idx=batch_idx, train=False, reduction="none"
+                )
+                
+                all_losses.append(loss)
+                all_accuracies.append(accuracy)
+                
+                output_dict = {
+                    "y_hat_rhs": y_hat_rhs,
+                    "partial_attentions": attentions,
+                    "partial_values": values,
+                }
+                if self.current_epoch == 0:
+                    output_dict["x_lhs"] = x_lhs
+                outputs.append(output_dict)
+        
+        # 合并结果
+        loss = torch.cat(all_losses, dim=0)
+        accuracy = torch.cat(all_accuracies, dim=0)
         perplexity = torch.exp(loss)
-        accuracy = torch.cat([x["partial_test_accuracy"] for x in outputs], dim=0)
-
+        
+        # 保存测试输出
+        if self.hparams.save_activations or self.hparams.save_outputs:
+            logdir = os.path.join(self.logdir, "outputs", "test")
+            os.makedirs(logdir, exist_ok=True)
+            pickle_file = os.path.join(logdir, "test_outputs.pt")
+            
+            output_data = {
+                "test_loss": loss,
+                "test_accuracy": accuracy,
+                "test_perplexity": perplexity,
+            }
+            if self.hparams.save_outputs:
+                output_data["y_hat_rhs"] = torch.cat([x["y_hat_rhs"] for x in outputs])
+            if self.hparams.save_activations:
+                partial_attentions = [o["partial_attentions"] for o in outputs]
+                attentions = self._merge_batch_activations(partial_attentions)
+                partial_values = [o["partial_values"] for o in outputs]
+                values = self._merge_batch_activations(partial_values)
+                output_data["attentions"] = attentions
+                output_data["values"] = values
+            
+            with open(pickle_file, "wb") as fh:
+                torch.save(output_data, fh)
+        
         logs = {
             "test_loss": loss,
             "test_accuracy": accuracy,
             "test_perplexity": perplexity,
         }
-
-        return {"test_loss": loss, "log": logs}
-
-    def forward(self, *args, **kwargs) -> Any:
-        """Passes all arguments directly to Tranformer.forward()"""
-        return self.transformer(*args, **kwargs)
+        
+        # 保存测试日志
+        test_log_file = os.path.join(self.logdir, "test_metrics.json")
+        with open(test_log_file, "w") as f:
+            json.dump({
+                "mean_test_loss": loss.mean().item(),
+                "mean_test_accuracy": accuracy.mean().item(),
+                "mean_test_perplexity": perplexity.mean().item()
+            }, f, indent=2)
+        
+        return logs
 
 
 def train(hparams: Namespace) -> None:
@@ -695,70 +752,26 @@ def train(hparams: Namespace) -> None:
         torch.backends.cudnn.deterministic = True
         torch.backends.cudnn.benchmark = False
 
-    checkpoint_path = hparams.logdir + "/checkpoints"
-    os.makedirs(checkpoint_path, exist_ok=True)
-    hparams.checkpoint_path = checkpoint_path
-
     # Create the model
-    model = TrainableTransformer(hparams).float()
+    model = TrainableTransformer(hparams)
 
-    torch.save(model, os.path.join(checkpoint_path, "init.pt"))
+    # 开始训练
+    model.fit()
 
-    logger = CSVLogger(hparams.logdir)
+    # 训练结束后进行测试
+    test_logs = model.test()
+    print(f"Test completed. Mean Test Accuracy: {test_logs['test_accuracy'].mean().item():.2f}%")
 
-    # checkpointer = ModelCheckpoint(
-    #     filepath=checkpoint_path,
-    #     monitor="save_ckpt",
-    #     mode="max",
-    #     save_top_k=len(hparams.ckpt_epochs),
-    #     verbose=False,
-    # )
-
-    trainer_args = {
-        "max_steps": hparams.max_steps,
-        "min_steps": hparams.max_steps,
-        "max_epochs": int(1e8),
-        "val_check_interval": 1,
-        "profiler": False,
-        # "checkpoint_callback": checkpointer,
-        "logger": logger,
-        "log_every_n_steps": 1,
-        "flush_logs_every_n_steps": 1000,
-    }
-    if torch.cuda.is_available() and hparams.gpu >= 0:
-        trainer_args["gpus"] = [hparams.gpu]
-
-    trainer = Trainer(**trainer_args)
-
-    trainer.fit(model=model)  # type: ignore
-    """
-    margin = np.percentile(model.margin.detach().cpu().numpy(), 5)
-    device = transformer.embedding.weight.device
-    measures, bounds = metrics.calculate(
-        transformer,
-        transformer_init.to(device),
-        device,
-        dataset_size,
-        margin,
-        input_dim=hparams.d_model,
-    )
-
-    measures_file = os.path.join(logger.log_dir, "measures.json")
-    bounds_file = os.path.join(logger.log_dir, "bounds.json")
-    with open(measures_file, "w") as fh:
-        json.dump(measures, fh)
-    with open(bounds_file, "w") as fh:
-        json.dump(bounds, fh)
-    """
     return hparams.logdir
 
 
-def compute_sharpness(hparams: Namespace, ckpts) -> None:
+def compute_sharpness(hparams: Namespace, ckpts: List[str]) -> None:
     """
     This is the compute_sharpness method. This loads a series of checkpoints in
     the defined hyperparameters
 
     :param hparams: An argparse.Namespace with all of the relevant hyperparameters
+    :param ckpts: 检查点文件路径列表
     """
 
     # Process the args
@@ -782,61 +795,38 @@ def compute_sharpness(hparams: Namespace, ckpts) -> None:
         torch.backends.cudnn.deterministic = True
         torch.backends.cudnn.benchmark = False
 
-    checkpoint_path = hparams.logdir + "/checkpoints"
-    os.makedirs(checkpoint_path, exist_ok=True)
-    hparams.checkpoint_path = checkpoint_path
+    # 创建结果目录
+    results_dir = "results"
+    os.makedirs(results_dir, exist_ok=True)
 
-    # Create the model
-    model = TrainableTransformer(hparams).float()
-
-    torch.save(model, os.path.join(checkpoint_path, "init.pt"))
-
-    logger = CSVLogger(hparams.logdir)
-
-
-    trainer_args = {
-        "max_steps": hparams.max_steps,
-        "min_steps": hparams.max_steps,
-        "max_epochs": int(1e8),
-        "val_check_interval": 1,
-        "profiler": False,
-        # "checkpoint_callback": checkpointer,
-        "logger": logger,
-        "log_every_n_steps": 1,
-        "flush_logs_every_n_steps": 1000,
-    }
-    if torch.cuda.is_available() and hparams.gpu >= 0:
-        trainer_args["gpus"] = [hparams.gpu]
-
-    trainer = Trainer(**trainer_args)
-
-    for ckpt in ckpts:
+    for i, ckpt in enumerate(ckpts):
         print(f"Loading checkpoint {ckpt}")
-        # model = torch.load(ckpt)
-        # model.load_state_dict(torch.load(ckpt))
+        checkpoint = torch.load(ckpt, map_location=f"cuda:{hparams.gpu}" if torch.cuda.is_available() and hparams.gpu >=0 else "cpu")
+        
+        # 重建模型
+        hps = Namespace(**checkpoint["hyper_parameters"])
+        # 覆盖必要的hparams
+        hps.gpu = hparams.gpu
+        hps.random_seed = hparams.random_seed
+        
+        model = TrainableTransformer(hps)
+        model.transformer.load_state_dict(checkpoint["model_state_dict"])
+        model.transformer.to(model.device)
+        
+        # 计算sharpness
+        phi = get_sharpness(model.train_dataloader(), model.transformer)
+        results = {ckpt: phi}
+        
+        # 保存结果
+        pickle.dump(results, open(os.path.join(results_dir, f"results_SD-{i}.pkl"), "wb"))
+        print(f"Saved sharpness results for checkpoint {ckpt}")
 
-        checkpoint = torch.load(ckpt)
-        # print(dir(checkpoint), type(checkpoint), "Ckpt")
-        # for k, v in checkpoint.items():
-        #     print(k)
-        # print(checkpoint["hyper_parameters"])
 
-        hps = checkpoint["hyper_parameters"]
-        hps = argparse.Namespace(**hps)
-        model = TrainableTransformer(hps).float()
-        model.load_state_dict(checkpoint["state_dict"])
-
-        phi = get_sharpness(model.train_dataloader(), model)
-        results = {}
-        results[ckpt] = phi
-        pickle.dump(results, open(f"results/results_SD-{i}.pkl", "wb"))
-
-
-def add_args(parser=None) -> Namespace:
+def add_args(parser=None) -> ArgumentParser:
     """
     Parses the command line arguments
 
-    :returns: an argparse.Namespace with all of the needed arguments
+    :returns: an argparse.ArgumentParser with all of the needed arguments
     """
     if parser is None:
         parser = ArgumentParser()
@@ -844,7 +834,6 @@ def add_args(parser=None) -> Namespace:
     parser.add_argument("--gpu", type=int, default=0)
     parser.add_argument("--max_epochs", type=int, default=None)
     parser.add_argument("--max_steps", type=int, default=100000)
-    # parser.add_argument("--checkpoint_period", type=int, default=1)
     parser = TrainableTransformer.add_model_specific_args(parser)
     return parser
 
@@ -873,8 +862,6 @@ class CustomAdamW(torch.optim.Optimizer):
             raise ValueError(
                 f"Invalid weight decay form: {weight_decay_form}, should be one of ['to_zero', 'to_init', 'jiggle']"
             )
-        # if not 0.0 <= weight_decay:
-        #     raise ValueError("Invalid weight_decay value: {}".format(weight_decay))
         defaults = dict(
             lr=lr,
             betas=betas,
@@ -953,7 +940,7 @@ class CustomAdamW(torch.optim.Optimizer):
                     elif group["weight_decay_form"] == "jiggle":
                         p.mul_(
                             torch.exp(
-                                torch.randn(1).cuda()
+                                torch.randn(1).to(p.device)
                                 * (group["lr"] * group["weight_decay"])
                             )
                         )
@@ -994,8 +981,6 @@ class CustomAdamW(torch.optim.Optimizer):
                 # add uniform gaussian noise to the update
                 if group["noise_factor"] > 0:
                     upd += torch.randn_like(upd) * group["noise_factor"]
-                # if group['noise_factor'] > 0:
-                #     upd *= torch.exp(torch.randn_like(upd) * group['noise_factor'])
                 p.add_(-step_size * upd)
 
         return loss
@@ -1063,9 +1048,30 @@ class SAM(torch.optim.Optimizer):
             for p in group["params"]
             if p.grad is not None
         ]
-        print("grad norms is ", grad_norms, "!" * 1000)
         norm = torch.norm(
             torch.stack(grad_norms),
             p=2,
         )
         return norm
+
+
+def main():
+    """主函数"""
+    parser = add_args()
+    # 添加模式选择参数
+    parser.add_argument("--mode", type=str, default="train", choices=["train", "compute_sharpness"],
+                      help="运行模式：train（训练）或 compute_sharpness（计算sharpness）")
+    parser.add_argument("--ckpts", nargs="+", help="compute_sharpness模式下需要的检查点文件路径列表")
+    
+    args = parser.parse_args()
+    
+    if args.mode == "train":
+        train(args)
+    elif args.mode == "compute_sharpness":
+        if not args.ckpts:
+            raise ValueError("compute_sharpness模式需要指定--ckpts参数")
+        compute_sharpness(args, args.ckpts)
+
+
+if __name__ == "__main__":
+    main()

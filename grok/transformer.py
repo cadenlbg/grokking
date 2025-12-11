@@ -9,21 +9,25 @@ import torch.nn.functional as F
 from numpy import cos, sin, sqrt
 from torch import tensor, Tensor
 from torch.optim.lr_scheduler import LambdaLR
-import pytorch_lightning as pl
 
-from argparse import ArgumentParser
+# 移除 pytorch_lightning 导入（原代码中未使用）
 
 
 class Linear(nn.Linear):
     def __init__(self, *args, **kwargs):
-        self.weight_noise = kwargs.pop("weight_noise")
+        self.weight_noise = kwargs.pop("weight_noise", 0.0)
         super().__init__(*args, **kwargs)
+        # 确保权重是 float32 类型
+        self.weight = nn.Parameter(self.weight.float())
+        if self.bias is not None:
+            self.bias = nn.Parameter(self.bias.float())
 
     def forward(self, input: Tensor) -> Tensor:
+        # 确保输入是 float32 类型
+        input = input.float()
         if self.weight_noise > 0 and self.training:
             bias = self.bias if self.bias is None else self.bias + torch.randn_like(self.bias) * self.weight_noise
             weight = self.weight + torch.randn_like(self.weight) * self.weight_noise
-            # weight = self.weight * torch.exp(torch.randn_like(self.weight) * self.weight_noise)
         else:
             bias = self.bias
             weight = self.weight
@@ -36,14 +40,20 @@ class Linear(nn.Linear):
 
 class LayerNorm(nn.LayerNorm):
     def __init__(self, *args, **kwargs):
-        self.weight_noise = kwargs.pop("weight_noise")
+        self.weight_noise = kwargs.pop("weight_noise", 0.0)
         super().__init__(*args, **kwargs)
+        # 确保权重是 float32 类型
+        if self.weight is not None:
+            self.weight = nn.Parameter(self.weight.float())
+        if self.bias is not None:
+            self.bias = nn.Parameter(self.bias.float())
 
     def forward(self, input: Tensor) -> Tensor:
+        # 确保输入是 float32 类型
+        input = input.float()
         if self.weight_noise > 0 and self.training:
             bias = self.bias if self.bias is None else self.bias + torch.randn_like(self.bias) * self.weight_noise
             weight = self.weight + torch.randn_like(self.weight) * self.weight_noise
-            # weight = self.weight * torch.exp(torch.randn_like(self.weight) * self.weight_noise)
         else:
             bias = self.bias
             weight = self.weight
@@ -58,13 +68,14 @@ class LayerNorm(nn.LayerNorm):
 
 class Embedding(nn.Embedding):
     def __init__(self, *args, **kwargs):
-        self.weight_noise = kwargs.pop("weight_noise")
+        self.weight_noise = kwargs.pop("weight_noise", 0.0)
         super().__init__(*args, **kwargs)
+        # 确保权重是 float32 类型
+        self.weight = nn.Parameter(self.weight.float())
 
     def forward(self, input: Tensor) -> Tensor:
         if self.weight_noise > 0 and self.training:
             weight = self.weight + torch.randn_like(self.weight) * self.weight_noise
-            # weight = self.weight * torch.exp(torch.randn_like(self.weight) * self.weight_noise)
         else:
             weight = self.weight
         return F.embedding(
@@ -79,10 +90,8 @@ class Embedding(nn.Embedding):
 
 
 class AttentionHead(nn.Module):
-    def __init__(self, d_model: int, d_key: int, weight_noise: float) -> None:
-
+    def __init__(self, d_model: int, d_key: int, weight_noise: float = 0.0) -> None:
         super().__init__()
-
         self.d_key = d_key
 
         # head projections
@@ -101,6 +110,11 @@ class AttentionHead(nn.Module):
         save_activations: bool = False,
     ) -> Tuple[Tensor, Union[Tensor, None], Union[Tensor, None]]:
 
+        # 确保输入是 float32 类型
+        queries = queries.float()
+        keys = keys.float()
+        values = values.float()
+        
         # project queries, keys, values
         queries = self.Wq(queries)
         keys = self.Wk(keys)
@@ -112,6 +126,8 @@ class AttentionHead(nn.Module):
 
         # Filter out attention to future positions
         if mask is not None:
+            # 确保 mask 类型与 attn 一致
+            mask = mask.float()
             attn.masked_fill_(mask == 0, float("-inf"))
 
         # softmax
@@ -150,6 +166,11 @@ class MultiHeadAttention(nn.Module):
         save_activations=False,
     ) -> Tuple[Tensor, List[Tensor], List[Tensor]]:
 
+        # 确保输入是 float32 类型
+        queries = queries.float()
+        keys = keys.float()
+        values = values.float()
+        
         head_outputs = [
             h(
                 queries=queries,
@@ -195,6 +216,8 @@ class FFN(nn.Module):
         )
 
     def forward(self, x: Tensor) -> Tensor:
+        # 确保输入是 float32 类型
+        x = x.float()
         return self.ffn(x)
 
 
@@ -210,7 +233,6 @@ class DecoderBlock(nn.Module):
         super().__init__()
 
         self.self_attn = MultiHeadAttention(d_model, heads, weight_noise=weight_noise)
-        # self.self_attn_drop = nn.Dropout(p=dropout)
         self.self_attn_norm = LayerNorm(d_model, weight_noise=weight_noise)
 
         self.ffn = FFN(d_model, non_linearity=non_linearity, weight_noise=weight_noise)
@@ -223,10 +245,12 @@ class DecoderBlock(nn.Module):
         self_attn_mask: Tensor = None,
         save_activations: bool = False,
     ) -> Tuple[Tensor, List[Tensor], List[Tensor]]:
+        # 确保输入是 float32 类型
+        x = x.float()
+        
         a1, layer_attns, layer_values = self.self_attn(
             x, x, x, self_attn_mask, save_activations
         )
-        # a1 = self.self_attn_drop(a1)
         a1 = self.self_attn_norm(x + a1)
 
         a2 = self.ffn(a1)
@@ -264,6 +288,9 @@ class Decoder(nn.Module):
         save_activations=False,
     ) -> Tuple[Tensor, List[List[Tensor]], List[List[Tensor]]]:
 
+        # 确保输入是 float32 类型
+        x = x.float()
+        
         a = x
         attentions = []
         values = []
@@ -302,9 +329,9 @@ class Transformer(nn.Module):
 
         self.embedding = Embedding(vocab_len, d_model, weight_noise=weight_noise)  # type: ignore
         self.register_buffer(
-            "position_encoding", self._position_encoding(max_context_len, d_model)
+            "position_encoding", self._position_encoding(max_context_len, d_model).float()
         )
-        self.register_buffer("self_attn_mask", self.make_mask(max_context_len))
+        self.register_buffer("self_attn_mask", self.make_mask(max_context_len).float())
 
         self.decoder = Decoder(
             d_model,
@@ -324,13 +351,14 @@ class Transformer(nn.Module):
     @classmethod
     def _position_encoding(cls, context_len: int, d_model: int) -> Tensor:
         rows = [
-            tensor(
+            torch.tensor(
                 [
                     sin(pos / (10000 ** (i / d_model)))
                     if i % 2 == 0
                     else cos(pos / (10000 ** ((i - 1) / d_model)))
                     for i in range(d_model)
-                ]
+                ],
+                dtype=torch.float32  # 明确指定为 float32
             )
             for pos in range(context_len)
         ]
@@ -339,6 +367,8 @@ class Transformer(nn.Module):
         return stack.T  # type: ignore
 
     def embed(self, indices: Tensor) -> Tensor:
+        # 确保输入是 long 类型（embedding 层要求）
+        indices = indices.long()
         context_len = indices.shape[-1]
         pe = self.position_encoding[:context_len, :]  # type: ignore
 
