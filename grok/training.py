@@ -356,12 +356,34 @@ class TrainableTransformer:
                 f.write(",".join(headers) + "\n")
 
     def _log_metrics(self, metrics_dict: Dict[str, Any]):
-        """将指标写入日志文件"""
-        # 确保所有指标都有值，没有的用NaN填充
+        
+    # 第一步：提取并判断 train_accuracy 和 val_accuracy 是否有效（不为 NaN）
+    
+        train_acc = metrics_dict.get("train_accuracy")
+        val_acc = metrics_dict.get("val_accuracy")
+    
+    # 处理 Tensor/np.ndarray 转数值，同时判断是否为 NaN
+        def is_valid_acc(acc):
+            if acc is None:
+                return False
+        # 转换为数值（处理 Tensor/np.ndarray）
+            if isinstance(acc, (Tensor, np.ndarray)):
+                acc_val = acc.item()
+            else:
+                acc_val = acc
+        # 判断是否为有效数值（非 NaN、非无穷）
+            return not (np.isnan(acc_val) or np.isinf(acc_val))
+    
+    # 过滤条件：train_acc 有效 OR val_acc 有效（满足其一则保留）
+        if not (is_valid_acc(train_acc) or is_valid_acc(val_acc)):
+            return  # 两者都为 NaN，不写入文件
+    
+    # 第二步：原有逻辑（只处理满足条件的行）
+    # 确保所有指标都有值，没有的用NaN填充
         all_headers = []
         with open(self.log_file, "r") as f:
             all_headers = f.readline().strip().split(",")
-        
+    
         values = []
         for header in all_headers:
             if header in metrics_dict:
@@ -373,9 +395,10 @@ class TrainableTransformer:
                 values.append(str(val))
             else:
                 values.append("NaN")
-        
+    
         with open(self.log_file, "a") as f:
             f.write(",".join(values) + "\n")
+
 
     def _save_inputs(self, x_lhs: Tensor, ds: str) -> None:
         """
