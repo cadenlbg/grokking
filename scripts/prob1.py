@@ -110,7 +110,7 @@ def plot_train_val_acc(data, save_path):
     # 保存图片
     plt.tight_layout()
     plt.savefig(save_path, dpi=300, bbox_inches="tight")
-    print(f"✅ 已保存：{save_path}")
+    print(f"已保存：{save_path}")
 
 def main():
     parser = argparse.ArgumentParser()
@@ -138,7 +138,7 @@ def main():
                     # 绘图保存
                     plot_train_val_acc(data, save_path)
 
-    print(f"\n🎉 所有图表已保存至：{args.output_dir}")
+    print(f"所有图表已保存至：{args.output_dir}")
 
 if __name__ == "__main__":
     main()
