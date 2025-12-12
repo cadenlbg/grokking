@@ -90,10 +90,7 @@ class TrainableTransformer:
         os.makedirs(self.checkpoint_path, exist_ok=True)
 
         # 日志文件
-        pct = f"{hparams.train_data_pct}".replace(".", "p")
-        max_step = f"{hparams.max_steps}"
-        operator = hparams.math_operator.replace("+", "plus").replace("-", "minus").replace("*", "mul")
-        filename = f"metrics_pct{pct}_maxstep{max_step}_operator{operator}.csv"
+        filename = "metrics.csv"
         
         log_dir = os.path.join(self.logdir, "metrics")
         os.makedirs(log_dir, exist_ok=True)
