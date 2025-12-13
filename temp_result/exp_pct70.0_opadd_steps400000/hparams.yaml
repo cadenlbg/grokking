@@ -1,7 +1,7 @@
 random_seed: -1
 gpu: 0
 max_epochs: null
-max_steps: 800000
+max_steps: 400000
 batchsize: 0
 n_layers: 2
 n_heads: 4
@@ -12,7 +12,7 @@ non_linearity: relu
 max_context_len: 50
 math_operator: +
 operand_length: null
-train_data_pct: 40.0
+train_data_pct: 70.0
 warmup_steps: 10
 anneal_lr_steps: 100000
 anneal_lr: false
@@ -22,6 +22,6 @@ weight_decay_kind: to_zero
 noise_factor: 0
 save_activations: false
 save_outputs: false
-logdir: /root/autodl-tmp/grokking-1/my_experiments/exp_pct40.0_opadd_steps800000
-datadir: /root/autodl-tmp/grokking-1/data
+logdir: /root/autodl-tmp/grokking/my_experiments/exp_pct70.0_opadd_steps400000
+datadir: /root/autodl-tmp/grokking/data
 d_key: 32.0

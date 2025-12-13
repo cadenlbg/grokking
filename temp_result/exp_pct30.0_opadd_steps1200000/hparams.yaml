@@ -1,7 +1,7 @@
 random_seed: -1
 gpu: 0
 max_epochs: null
-max_steps: 1000000
+max_steps: 1200000
 batchsize: 0
 n_layers: 2
 n_heads: 4
@@ -22,6 +22,6 @@ weight_decay_kind: to_zero
 noise_factor: 0
 save_activations: false
 save_outputs: false
-logdir: /root/autodl-tmp/grokking-1/my_experiments/exp_pct30.0_opadd_steps1000000
-datadir: /root/autodl-tmp/grokking-1/data
+logdir: /mnt/workspace/grokking/my_experiments/exp_pct30.0_opadd_steps1200000
+datadir: /mnt/workspace/grokking/data
 d_key: 32.0
