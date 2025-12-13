@@ -34,9 +34,10 @@ hparams = parser.parse_args()
 pct = hparams.train_data_pct
 operator_name = OPERATOR_MAPPING.get(hparams.math_operator, hparams.math_operator)
 max_steps = hparams.max_steps
+n_layers=hparams.n_layers
 
 # 2. 构造新文件夹名称（包含关键参数信息）
-exp_name = f"exp_pct{pct}_op{operator_name}_steps{max_steps}"
+exp_name = f"exp_pct{pct}_op{operator_name}_steps{max_steps}_n_layers{n_layers}"
 
 # 3. 定义根目录my_experiments，并创建完整路径
 root_dir = Path("my_experiments")
