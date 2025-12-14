@@ -151,6 +151,61 @@ class ArithmeticTokenizer:
 class ArithmeticDataset:
     """A Dataset of arithmetic equations"""
 
+    @staticmethod
+    def _extract_label(eq_str: str, tokenizer: ArithmeticTokenizer) -> Optional[int]:
+        """
+        从等式字符串中提取标签（结果），转换为数值（仅处理数值类结果）
+        :param eq_str: 等式字符串（含EOS_TOKEN）
+        :param tokenizer: 分词器（用于解析tokens）
+        :return: 标签数值（非数值结果返回None）
+        """
+        # 去除EOS_TOKEN，分割为tokens
+        eq_clean = eq_str.replace(EOS_TOKEN, "").strip()
+        tokens = eq_clean.split(" ")
+        if EQ_TOKEN not in tokens:
+            return None  # 无效等式，跳过
+        
+        # 找到"="后面的部分（标签tokens）
+        eq_idx = tokens.index(EQ_TOKEN)
+        label_tokens = tokens[eq_idx+1:]
+        if not label_tokens:
+            return None
+        
+        # 合并标签tokens，处理不同格式（数字、Mod对象、字符串）
+        label_str = " ".join(label_tokens).strip()
+        try:
+            # 处理纯数字（如"8"）
+            return int(label_str)
+        except ValueError:
+            # 处理Mod对象（如"Mod(8,97)"）
+            if label_str.startswith("Mod(") and label_str.endswith(")"):
+                return int(label_str.split(",")[0].split("(")[1])
+            # 非数值结果（如S5排列"01234"）返回None，不纳入mask过滤
+            return None
+
+    # 新增：按mask规则过滤数据
+    @staticmethod
+    def _filter_by_mask(eqs: List[str], tokenizer: ArithmeticTokenizer) -> Tuple[List[str], List[str]]:
+        """
+        按mask规则过滤数据：
+        - train_eqs: 标签 > 20 的等式
+        - val_eqs: 标签 < 20 的等式
+        :return: (train_eqs, val_eqs)
+        """
+        train_eqs = []
+        val_eqs = []
+        for eq in eqs:
+            label = ArithmeticDataset._extract_label(eq, tokenizer)
+            if label is None:
+                continue  # 非数值结果，不纳入任何集
+            if label > 20:
+                train_eqs.append(eq)
+            elif label < 20:
+                val_eqs.append(eq)
+        # 打印过滤统计信息
+        print(f"Mask过滤后：训练集{len(train_eqs)}条（label>20），验证集{len(val_eqs)}条（label<20）")
+        return train_eqs, val_eqs
+    
     @classmethod
     # 创建训练集和验证集
     def splits(
@@ -159,6 +214,7 @@ class ArithmeticDataset:
         operator: str,
         operand_length: Optional[int] = None,
         data_dir: str = DEFAULT_DATA_DIR,
+        use_mask: bool = False,  # 新增：接收mask开关
     ):
         """
         Creates training and validation datasets
@@ -168,20 +224,34 @@ class ArithmeticDataset:
         :param operand_length: for list based datasets the length of the lists
         :returns: (train_dataset, validation_dataset)
         """
-
         assert (0 < train_pct) and (train_pct < 100)
-        #生成名称
+        # 生成名称
         ds_name = cls.get_dsname(operator, operand_length)
-        #生成所有等式
+        # 生成所有等式
         eqs = cls.make_data(operator, operand_length)
-        #计算train_set和val_set的划分长度
-        train_rows, _ = cls.calc_split_len(train_pct, len(eqs))
+        # 创建临时tokenizer用于解析标签（仅mask启用时需要）
+        tokenizer = ArithmeticTokenizer(data_dir)
+
+        if use_mask:
+            # 按label过滤得到训练集和验证集
+            train_eqs, val_eqs = cls._filter_by_mask(eqs, tokenizer)
+            # 若过滤后训练集/验证集为空，抛出警告
+            if not train_eqs:
+                print("警告：mask过滤后训练集为空！请检查数据或调整mask规则")
+            if not val_eqs:
+                print("警告：mask过滤后验证集为空！请检查数据或调整mask规则")
+        else:
+            train_rows, _ = cls.calc_split_len(train_pct, len(eqs))
+            train_eqs = eqs[:train_rows]
+            val_eqs = eqs[train_rows:]
         #初始化train_set和val_set实例
-        train_ds = cls(ds_name, eqs[:train_rows], train=True, data_dir=data_dir)
-        val_ds = cls(ds_name, eqs[train_rows:], train=False, data_dir=data_dir)
+        train_ds = cls(ds_name, train_eqs, train=True, data_dir=data_dir)
+        val_ds = cls(ds_name, val_eqs, train=False, data_dir=data_dir)
 
         return train_ds, val_ds
 
+
+        
     @classmethod
     # 计算训练集和验证集的划分长度
     def calc_split_len(cls, train_pct, ds_len):

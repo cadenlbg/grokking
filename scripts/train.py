@@ -41,7 +41,7 @@ random_seed=hparams.random_seed
 exp_name = f"exp_pct{pct}_op{operator_name}_steps{max_steps}_weight_decay{weight_decay}_random_seed{random_seed}"
 
 # 3. 定义根目录my_experiments，并创建完整路径
-root_dir = Path("my_experiments/weight_decay")
+root_dir = Path("my_experiments")
 exp_dir = root_dir / exp_name  # 拼接路径：my_experiments/exp_pct30.0_opadd_steps100000...
 
 # 4. 创建文件夹（如果不存在）

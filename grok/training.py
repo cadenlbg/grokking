@@ -130,7 +130,9 @@ class TrainableTransformer:
             type=int,
             help="for list operations, the length of the lists",
         )
-
+        parser.add_argument("--use_mask", action="store_true", default=False,
+                      help="Whether to use label-based mask for dataset split. "
+                           "If True: train set = label>20, val set = label<20")
         parser.add_argument("--train_data_pct", type=float, default=5)
         parser.add_argument("--warmup_steps", type=int, default=10)
         parser.add_argument("--anneal_lr_steps", type=int, default=100000)
@@ -172,6 +174,7 @@ class TrainableTransformer:
             operator=self.hparams.math_operator,
             operand_length=self.hparams.operand_length,
             data_dir=self.hparams.datadir,
+            use_mask=self.hparams.use_mask,
         )
 
     def train_dataloader(self) -> ArithmeticIterator:
