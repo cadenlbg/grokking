@@ -17,12 +17,8 @@ import json
 from grok.data import ArithmeticDataset, ArithmeticIterator
 
 DEFAULT_MLP_HIDDEN_DIMS = [512, 256, 128]
-DEFAULT_EMBEDDING_DIM = 128
+DEFAULT_EMBEDDING_DIM = 256
 
-def save_hparams(hparams: Namespace, save_path: str) -> None:
-    Path(os.path.dirname(save_path)).mkdir(parents=True, exist_ok=True)
-    with open(save_path, "w") as f:
-        yaml.dump(vars(hparams), f, sort_keys=False)
 
 class TrainableMLP:
     def __init__(self, hparams: Namespace) -> None:
@@ -33,9 +29,8 @@ class TrainableMLP:
         
         # 数据准备
         self.prepare_data()
+        self.get_length()
         self.vocab_size = len(self.train_dataset.tokenizer)
-        # 获取 pad token 的索引（关键：用于序列补齐）
-        self.pad_token_idx = self.train_dataset.tokenizer.stoi.get("<PAD>", 0)
         
         # 初始化编码相关
         self._init_encoding()
@@ -52,12 +47,11 @@ class TrainableMLP:
         if self.hparams.encoding == "embedding":
             self.embedding = nn.Embedding(
                 num_embeddings=self.vocab_size,
-                embedding_dim=self.hparams.embedding_dim,
-                padding_idx=self.pad_token_idx  # Embedding 层也要指定 pad_token
+                embedding_dim=self.hparams.embedding_dim
             ).to(self.device)
             # 位置编码
             self.positional_encoding = self._get_positional_encoding(
-                max_len=self.hparams.max_context_len,
+                max_len=self.lhs_len,
                 d_model=self.hparams.embedding_dim
             ).to(self.device)
         
@@ -71,6 +65,8 @@ class TrainableMLP:
         self.batches_per_epoch = 0
         self.current_epoch = 0
         self.global_step = 0
+        self.next_epoch_to_eval = -1
+        self.next_train_epoch_to_log = 0
         
         # 日志和检查点目录
         self.logdir = hparams.logdir
@@ -81,15 +77,52 @@ class TrainableMLP:
         self.log_file = os.path.join(self.logdir, "metrics", "metrics.csv")
         os.makedirs(os.path.dirname(self.log_file), exist_ok=True)
         self._init_log_file()
+    
+    def get_length(self):
+     """从数据集中获取等号左侧和右侧的长度"""
+     sample = self.train_dataset.data[0, :]
+     print(f"样本形状: {sample.shape}")
+     print(f"样本内容: {sample}")
+    
+     eq_token_index = self.train_dataset.tokenizer.stoi.get("=", -1)
+     eos_token_index = self.train_dataset.tokenizer.stoi.get("<|eos|>", -1)
+    
+     print(f"等号token索引: {eq_token_index}")
+     print(f"EOS token索引: {eos_token_index}")
+    
+     if eq_token_index == -1:
+        print("错误: Tokenizer中没有找到'='符号")
+     if eos_token_index == -1:
+        print("错误: Tokenizer中没有找到'<|eos|>'符号")
+    
+     eq_positions = (sample == eq_token_index).nonzero(as_tuple=True)[0]
+     eos_positions = (sample == eos_token_index).nonzero(as_tuple=True)[0]
+    
+     print(f"等号位置: {eq_positions}")
+     print(f"EOS位置: {eos_positions}")
+    
+     if len(eq_positions) > 0 and len(eos_positions) > 0:
+        eq_pos = eq_positions[0].item()
+        eos_pos = eos_positions[0].item()
+        eos_pos_right=eos_positions[1].item()
+        
+        print(f"等号位置索引: {eq_pos}")
+        print(f"EOS位置索引: {eos_pos},{eos_pos_right}")
+        
+        # 计算长度
+        self.lhs_len = eq_pos + 1  # 包括等号
+        self.rhs_len = eos_pos_right-eq_pos - 1  # 等号右侧
+    
+     print(f"最终长度: LHS={self.lhs_len}, RHS={self.rhs_len}")
 
     def _init_encoding(self):
         """初始化编码方式和输入/输出维度"""
         if self.hparams.encoding == "onehot":
-            self.input_dim = self.hparams.max_context_len * self.vocab_size
-            self.output_dim = self.input_dim
+            self.input_dim = self.lhs_len * self.vocab_size
+            self.output_dim = self.rhs_len * self.vocab_size
         elif self.hparams.encoding == "embedding":
-            self.input_dim = self.hparams.max_context_len * self.hparams.embedding_dim
-            self.output_dim = self.hparams.max_context_len * self.vocab_size
+            self.input_dim = self.lhs_len * self.hparams.embedding_dim
+            self.output_dim = self.rhs_len * self.vocab_size
         else:
             raise ValueError(f"不支持的编码方式：{self.hparams.encoding}")
 
@@ -141,38 +174,17 @@ class TrainableMLP:
             use_mask=self.hparams.use_mask,
         )
 
-    def _pad_sequence(self, x: Tensor) -> Tensor:
-        """将序列 pad 到 max_context_len（关键修复）"""
-        batch_size, seq_len = x.shape
-        max_len = self.hparams.max_context_len
-        
-        if seq_len < max_len:
-            # 需要 pad：在序列末尾添加 pad_token_idx，形状变为 (batch_size, max_len)
-            pad_length = max_len - seq_len
-            pad_tensor = torch.full((batch_size, pad_length), self.pad_token_idx, device=self.device)
-            x_padded = torch.cat([x, pad_tensor], dim=1)
-        elif seq_len > max_len:
-            # 序列过长：截断到 max_context_len
-            x_padded = x[:, :max_len]
-        else:
-            # 长度正好，无需处理
-            x_padded = x
-        
-        return x_padded
-
     def _encode_input(self, x: Tensor) -> Tensor:
-        """编码输入（One-Hot/Embedding）+ 序列 pad（关键修复）"""
-        # 第一步：将序列 pad 到 max_context_len（确保维度一致）
-        x_padded = self._pad_sequence(x)
-        batch_size, seq_len = x_padded.shape  # 现在 seq_len = max_context_len
-        
+        batch_size, seq_len = x.shape
+        x = x[:, :self.lhs_len]
+        seq_len = self.lhs_len
         if self.hparams.encoding == "onehot":
-            # One-Hot 编码：(batch_size, seq_len) → (batch_size, seq_len, vocab_size) → (batch_size, seq_len*vocab_size)
-            onehot = F.one_hot(x_padded, num_classes=self.vocab_size).float()
+            # One-Hot 编码
+            onehot = F.one_hot(x, num_classes=self.vocab_size).float()
             return onehot.reshape(batch_size, -1)
         elif self.hparams.encoding == "embedding":
-            # Embedding 编码：(batch_size, seq_len) → (batch_size, seq_len, embedding_dim) → (batch_size, seq_len*embedding_dim)
-            embed = self.embedding(x_padded)
+            # Embedding 编码
+            embed = self.embedding(x)
             embed = embed + self.positional_encoding[:, :seq_len, :]
             return embed.reshape(batch_size, -1)
 
@@ -224,66 +236,68 @@ class TrainableMLP:
         return optimizer, scheduler
 
     def _accuracy(self, y_hat: Tensor, y: Tensor) -> Tensor:
-        """计算准确率（同时对 y 进行 pad 匹配）"""
-        # 对目标序列也进行 pad，确保和预测序列长度一致
-        y_padded = self._pad_sequence(y)
-        batch_size, seq_len = y_padded.shape
-        
-        y_hat_seq = y_hat.reshape(batch_size, seq_len, self.vocab_size)
-        y_hat_pred = y_hat_seq.argmax(dim=-1)
-        
-        # 等号右侧准确率
-        eq_token_index = self.train_dataset.tokenizer.stoi.get("=", -1)
-        if eq_token_index == -1:
-            raise ValueError("Tokenizer 中未找到 '=' 符号")
-        
-        # 找到等号位置（取第一个样本的等号位置，假设批次内所有样本等号位置一致）
-        eq_position = torch.nonzero(y_padded[0, :] == eq_token_index, as_tuple=True)[0]
-        if len(eq_position) == 0:
-            raise ValueError("样本中未找到 '=' 符号")
-        eq_position = eq_position[0].item()
-        
-        y_rhs = y_padded[..., eq_position + 1:]
-        y_hat_rhs = y_hat_pred[..., eq_position + 1:]
-        
-        row_acc = torch.min((y_hat_rhs == y_rhs), dim=-1).values.float() * 100
+        """计算准确率，只考虑等号右侧"""
+        y_hat = torch.max(y_hat, dim=-2).indices
+        row_acc = torch.min((y_hat == y), dim=-1).values.float() * 100
         return row_acc.mean()
-
+    
+    def _tokens_to_string(self, tokens: Tensor) -> str:
+        """将token索引转换为字符串"""
+        tokenizer = self.train_dataset.tokenizer
+        result = []
+        for idx in tokens:
+                # 使用tokenizer的itos映射
+                if hasattr(tokenizer, 'itos') and idx.item() < len(tokenizer.itos):
+                    result.append(tokenizer.itos[idx.item()])
+                else:
+                    # 如果没有itos，尝试使用stoi的反向映射
+                    for char, token_idx in tokenizer.stoi.items():
+                        if token_idx == idx.item():
+                            result.append(char)
+                            break
+                    else:
+                        result.append(f"[{idx.item()}]")
+        return "".join(result)
+    
     def _step(self, batch, batch_idx, train=True):
-        """单批次前向传播"""
-        x = batch["text"]
-        y = batch["target"]
+        """单批次前向传播，只预测等号右侧"""
+        x = batch["text"]  # 输入：等号左侧（包括等号）
+        y = batch["target"]  # 目标：整个序列右移一位
         
         self.mlp.train(train)
         if self.hparams.encoding == "embedding":
             self.embedding.train(train)
         
         with torch.set_grad_enabled(train):
-            x_encoded = self._encode_input(x)  # 编码前已 pad
-            y_hat_flat = self.mlp(x_encoded)
+            x_encoded = self._encode_input(x)
+            y_hat_flat = self.mlp(x_encoded)  # 形状: (batch_size, rhs_len * vocab_size)
             
-            # 处理输出：确保目标序列也 pad 到 max_context_len
-            y_padded = self._pad_sequence(y)
-            batch_size, seq_len = y_padded.shape
-            y_hat_seq = y_hat_flat.reshape(batch_size, seq_len, self.vocab_size).transpose(-2, -1)
+            batch_size = x.shape[0]
             
-            # 等号右侧损失
+            # 重塑为: (batch_size, rhs_len, vocab_size)
+            y_hat_seq = y_hat_flat.reshape(batch_size, self.rhs_len, self.vocab_size)
+            y_hat_seq = y_hat_seq.transpose(-2, -1)  # (batch, vocab, rhs_len)
+            
+            # 提取等号右侧的真实目标
             eq_token_index = self.train_dataset.tokenizer.stoi.get("=", -1)
             if eq_token_index == -1:
                 raise ValueError("Tokenizer 中未找到 '=' 符号")
-            eq_position = torch.nonzero(y_padded[0, :] == eq_token_index, as_tuple=True)[0]
+            
+            # 找到等号位置（在目标序列y中）
+            eq_position = torch.nonzero(y[0, :] == eq_token_index, as_tuple=True)[0]
             if len(eq_position) == 0:
                 raise ValueError("样本中未找到 '=' 符号")
             eq_position = eq_position[0].item()
             
-            y_rhs = y_padded[..., eq_position + 1:]
-            y_hat_rhs = y_hat_seq[..., eq_position + 1:]
+            # 提取等号右侧部分
+            y_rhs = y[..., eq_position + 1:-1]
             
-            loss = F.cross_entropy(y_hat_rhs, y_rhs)
+            # 计算损失（只对等号右侧）
+            loss = F.cross_entropy(y_hat_seq, y_rhs)
             
             # 准确率
             with torch.no_grad():
-                acc = self._accuracy(y_hat_flat, y)
+                acc = self._accuracy(y_hat_seq, y_rhs)
             
             coeff = float(y.shape[0]) / len(self.train_dataset) if train else float(y.shape[0]) / len(self.val_dataset)
         
@@ -321,6 +335,8 @@ class TrainableMLP:
         total_loss = 0.0
         total_acc = 0.0
         
+        epoch_to_log = self.current_epoch == self.next_train_epoch_to_log
+
         for batch_idx, batch in enumerate(train_loader):
             loss, acc, coeff = self._step(batch, batch_idx, train=True)
             
@@ -337,20 +353,27 @@ class TrainableMLP:
                 "encoding": self.hparams.encoding
             })
             global_pbar.update(1)
-            
-            total_loss += (coeff * loss).item()
-            total_acc += (coeff * acc).item()
+
+            if epoch_to_log:
+                total_loss += (coeff * loss).item()
+                total_acc += (coeff * acc).item()
         
-        return {
-            "train_loss": torch.tensor(total_loss),
-            "train_accuracy": torch.tensor(total_acc),
-            "train_perplexity": torch.exp(torch.tensor(total_loss)),
-            "learning_rate": scheduler.get_last_lr()[0],
-            "time_per_epoch": time.time() - start_time
-        }
+        if epoch_to_log:
+            self.next_train_epoch_to_log = max(int(1.01 * self.next_train_epoch_to_log), self.next_train_epoch_to_log + 1)
+            return {
+                "train_loss": torch.tensor(total_loss),
+                "train_accuracy": torch.tensor(total_acc),
+                "train_perplexity": torch.exp(torch.tensor(total_loss)),
+                "learning_rate": scheduler.get_last_lr()[0],
+                "time_per_epoch": time.time() - start_time
+            }
+        return {}
 
     def validation_epoch(self, val_loader):
         """验证一个epoch"""
+        if self.current_epoch <= self.next_epoch_to_eval:
+            return {}
+        
         self.mlp.eval()
         if self.hparams.encoding == "embedding":
             self.embedding.eval()
@@ -432,8 +455,8 @@ class TrainableMLP:
         with torch.no_grad():
             for batch in test_loader:
                 loss, acc, _ = self._step(batch, 0, train=False)
-                all_losses.append(loss)
-                all_accs.append(acc)
+                all_losses.append(loss.unsqueeze(0))
+                all_accs.append(acc.unsqueeze(0) )
         
         loss = torch.cat(all_losses).mean()
         acc = torch.cat(all_accs).mean()
