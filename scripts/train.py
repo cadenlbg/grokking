@@ -34,14 +34,14 @@ hparams = parser.parse_args()
 pct = hparams.train_data_pct
 operator_name = OPERATOR_MAPPING.get(hparams.math_operator, hparams.math_operator)
 max_steps = hparams.max_steps
-weight_decay=hparams.weight_decay
+dropout=hparams.dropout
 random_seed=hparams.random_seed
 
 # 2. 构造新文件夹名称（包含关键参数信息）
-exp_name = f"exp_pct{pct}_mlp_steps{max_steps}_weight_decay{weight_decay}_random_seed{random_seed}"
+exp_name = f"exp_pct{pct}_op{operator_name}_steps{max_steps}_dropout_{dropout}_random_seed{random_seed}"
 
 # 3. 定义根目录my_experiments，并创建完整路径
-root_dir = Path("my_experiments")
+root_dir = Path("my_experiments/dropout_0.1")
 exp_dir = root_dir / exp_name  # 拼接路径：my_experiments/exp_pct30.0_opadd_steps100000...
 
 # 4. 创建文件夹（如果不存在）
