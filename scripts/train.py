@@ -38,7 +38,7 @@ weight_decay=hparams.weight_decay
 random_seed=hparams.random_seed
 
 # 2. 构造新文件夹名称（包含关键参数信息）
-exp_name = f"exp_pct{pct}_op{operator_name}_steps{max_steps}_weight_decay{weight_decay}_random_seed{random_seed}"
+exp_name = f"exp_pct{pct}_mlp_steps{max_steps}_weight_decay{weight_decay}_random_seed{random_seed}"
 
 # 3. 定义根目录my_experiments，并创建完整路径
 root_dir = Path("my_experiments")
