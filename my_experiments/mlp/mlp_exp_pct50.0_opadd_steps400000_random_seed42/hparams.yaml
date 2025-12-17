@@ -1,0 +1,26 @@
+random_seed: 42
+gpu: 0
+max_steps: 400000
+math_operator: +
+operand_length: null
+use_mask: false
+train_data_pct: 50.0
+datadir: /mnt/workspace/grokking/data
+batchsize: 0
+max_context_len: 50
+dropout: 0.0
+warmup_steps: 10
+anneal_lr_steps: 100000
+anneal_lr: false
+max_lr: 0.001
+weight_decay: 0.06
+weight_decay_kind: to_zero
+noise_factor: 0
+logdir: /mnt/workspace/grokking/my_experiments/mlp/mlp_exp_pct50.0_opadd_steps400000_random_seed42
+model_type: mlp
+mlp_hidden_dims:
+- 512
+- 128
+- 32
+encoding: onehot
+embedding_dim: 256
