@@ -171,6 +171,24 @@ class TrainableTransformer:
                 f.write(",".join(headers) + "\n")
 
     def _log_metrics(self, metrics_dict):
+
+        def is_nan_or_inf(val):
+            if val is None or val == "NaN":
+                return True
+         # 处理张量
+            if isinstance(val, Tensor):
+                val = val.item()
+         # 处理数字
+            if isinstance(val, (float, int)):
+                return np.isnan(val) or np.isinf(val)
+         # 其他类型视为非NaN
+            return False
+
+        train_acc = metrics_dict.get("train_accuracy", "NaN")
+        val_acc = metrics_dict.get("val_accuracy", "NaN")
+        if is_nan_or_inf(train_acc) and is_nan_or_inf(val_acc):
+            return
+    
         """写入日志"""
         with open(self.log_file, "r") as f:
             headers = f.readline().strip().split(",")
@@ -305,8 +323,8 @@ class TrainableTransformer:
         with torch.no_grad():
             for batch in test_loader:
                 loss, acc, _, _, _ = self._step(batch, 0, train=False)
-                all_losses.append(loss)
-                all_accs.append(acc)
+                all_losses.append(loss.unsqueeze(0))
+                all_accs.append(acc.unsqueeze(0))
         
         loss = torch.cat(all_losses).mean()
         acc = torch.cat(all_accs).mean()

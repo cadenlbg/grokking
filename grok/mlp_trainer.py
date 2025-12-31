@@ -316,6 +316,23 @@ class TrainableMLP:
 
     def _log_metrics(self, metrics_dict):
         """写入日志"""
+        def is_nan_or_inf(val):
+            if val is None or val == "NaN":
+                return True
+         # 处理张量
+            if isinstance(val, Tensor):
+                val = val.item()
+         # 处理数字
+            if isinstance(val, (float, int)):
+                return np.isnan(val) or np.isinf(val)
+         # 其他类型视为非NaN
+            return False
+
+        train_acc = metrics_dict.get("train_accuracy", "NaN")
+        val_acc = metrics_dict.get("val_accuracy", "NaN")
+        if is_nan_or_inf(train_acc) and is_nan_or_inf(val_acc):
+            return
+
         with open(self.log_file, "r") as f:
             headers = f.readline().strip().split(",")
         
@@ -386,6 +403,8 @@ class TrainableMLP:
                 loss, acc, coeff = self._step(batch, batch_idx, train=False)
                 total_loss += (coeff * loss).item()
                 total_acc += (coeff * acc).item()
+
+        self.next_epoch_to_eval = max(int(1.02 * self.next_epoch_to_eval), self.next_epoch_to_eval + 1)
         
         # 保存检查点
         if self.current_epoch > 0 and (self.current_epoch & (self.current_epoch - 1)) == 0:  # 2的幂次epoch

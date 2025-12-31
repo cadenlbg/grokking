@@ -36,7 +36,7 @@ pct = hparams.train_data_pct
 operator_name = OPERATOR_MAPPING.get(hparams.math_operator, hparams.math_operator)
 max_steps = hparams.max_steps
 random_seed = hparams.random_seed
-exp_name = f"mlp_exp_pct{pct}_op{operator_name}_steps{max_steps}_random_seed{random_seed}"
+exp_name = f"exp_pct{pct}_op{operator_name}_steps{max_steps}_random_seed{random_seed}"
 
 # 3. 以用户指定logdir为根目录，创建唯一子目录（解决路径覆盖）
 user_logdir = Path(hparams.logdir)
