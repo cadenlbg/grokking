@@ -7,11 +7,12 @@ setup(
     install_requires=[
         "pytorch_lightning==1.0.0",
         "blobfile",
-        "numpy<2",
+        "numpy",
         "torch",
         "tqdm",
         "scipy",
         "mod",
         "matplotlib",
+        "pandas"
     ],
 )

@@ -1,0 +1,7 @@
+{
+  "model_type": "mlp",
+  "encoding": "embedding",
+  "test_loss": 0.0011250535026192665,
+  "test_accuracy": 100.0,
+  "test_perplexity": 1.001125693321228
+}

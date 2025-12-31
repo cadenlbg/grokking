@@ -13,84 +13,8 @@ from grok.transformer_trainer import TrainableTransformer
 # 导入自定义模块获取常量
 from grok.data import VALID_OPERATORS, DEFAULT_DATA_DIR
 
-# ==============================================================================
-# 共用工具类（优化器）
-# ==============================================================================
-class CustomAdamW(torch.optim.Optimizer):
-    def __init__(
-        self,
-        params,
-        lr=1e-3,
-        betas=(0.9, 0.999),
-        eps=1e-8,
-        weight_decay=1e-2,
-        amsgrad=False,
-        noise_factor=0.0,
-        weight_decay_form="to_zero",
-    ):
-        defaults = dict(
-            lr=lr,
-            betas=betas,
-            eps=eps,
-            weight_decay=weight_decay,
-            amsgrad=amsgrad,
-            noise_factor=noise_factor,
-            weight_decay_form=weight_decay_form,
-        )
-        super(CustomAdamW, self).__init__(params, defaults)
-
-    @torch.no_grad()
-    def step(self, closure=None):
-        loss = closure() if closure is not None else None
-
-        for group in self.param_groups:
-            for p in group["params"]:
-                if p.grad is None:
-                    continue
-                grad = p.grad
-
-                # 权重衰减
-                if group["weight_decay"] > 0:
-                    if group["weight_decay_form"] == "honest":
-                        grad = grad + group["weight_decay"] * p.detach()
-
-                state = self.state[p]
-                if len(state) == 0:
-                    state["step"] = 0
-                    state["exp_avg"] = torch.zeros_like(p)
-                    state["exp_avg_sq"] = torch.zeros_like(p)
-                    if group["weight_decay_form"] == "to_init":
-                        state["init"] = p.detach().clone()
-
-                # 权重衰减逻辑
-                if group["weight_decay"] > 0:
-                    if group["weight_decay_form"] == "to_zero":
-                        p.mul_(1 - group["lr"] * group["weight_decay"])
-                    elif group["weight_decay_form"] == "to_init":
-                        p.add_((state["init"] - p) * (group["lr"] * group["weight_decay"]))
-                    elif group["weight_decay_form"] == "jiggle":
-                        p.mul_(torch.exp(torch.randn(1).to(p.device) * (group["lr"] * group["weight_decay"])))
-
-                # Adam 核心逻辑
-                exp_avg, exp_avg_sq = state["exp_avg"], state["exp_avg_sq"]
-                beta1, beta2 = group["betas"]
-                state["step"] += 1
-
-                exp_avg.mul_(beta1).add_(grad, alpha=1 - beta1)
-                exp_avg_sq.mul_(beta2).addcmul_(grad, grad, value=1 - beta2)
-
-                bias_correction1 = 1 - beta1 ** state["step"]
-                bias_correction2 = 1 - beta2 ** state["step"]
-                denom = (exp_avg_sq.sqrt() / np.sqrt(bias_correction2)).add_(group["eps"])
-                step_size = group["lr"] / bias_correction1
-
-                # 梯度噪声
-                upd = exp_avg / denom
-                if group["noise_factor"] > 0:
-                    upd += torch.randn_like(upd) * group["noise_factor"]
-                p.add_(-step_size * upd)
-
-        return loss
+# ========== 关键修改：从 optimizer.py 导入 CustomAdamW ==========
+from grok.optimizer import CustomAdamW
 
 # ==============================================================================
 # 统一参数解析（重构：全局参数 + 子命令（mlp/transformer））
@@ -99,6 +23,7 @@ def add_args() -> ArgumentParser:
     parser = ArgumentParser(description="统一训练入口（MLP/Transformer + One-Hot/Embedding）")
     
     # -------------------------- 全局公共参数（所有模型共享） --------------------------
+    # （原有参数保持不变）
     parser.add_argument("--random_seed", type=int, default=-1, help="随机种子（-1 不固定）")
     parser.add_argument("--gpu", type=int, default=0, help="GPU 卡号（-1 用 CPU）")
     parser.add_argument("--max_steps", type=int, default=100000, help="最大训练步数")
@@ -123,25 +48,67 @@ def add_args() -> ArgumentParser:
     parser.add_argument("--noise_factor", type=float, default=0, help="梯度噪声系数")
     parser.add_argument("--logdir", type=str, default="logs", help="日志和检查点目录")
     
-    # -------------------------- 模型子命令（核心修改：移除 --model_type，用子命令指定） --------------------------
+    # ========== 优化器类型选择（默认adamw，支持自定义优化器） ==========
+    parser.add_argument(
+        "--optimizer",
+        type=str,
+        default="adamw",
+        choices=["adamw", "custom_sgd", "custom_rmsprop", "custom_momentum"],
+        help="选择训练使用的优化器（默认：adamw，支持：custom_sgd、custom_rmsprop、custom_momentum）"
+    )
+
+    # ========== 各自定义优化器的可调参数 ==========
+    # CustomSGD 专属参数
+    parser.add_argument(
+        "--sgd_momentum",
+        type=float,
+        default=0.9,
+        help="CustomSGD/CustomMomentum的动量系数（默认：0.9，仅对应优化器生效）"
+    )
+    parser.add_argument(
+        "--sgd_nesterov",
+        action="store_true",
+        default=False,
+        help="CustomSGD是否使用Nesterov动量（默认：False，仅custom_sgd生效）"
+    )
+
+    # CustomRMSprop 专属参数
+    parser.add_argument(
+        "--rmsprop_alpha",
+        type=float,
+        default=0.99,
+        help="CustomRMSprop的移动平均衰减系数（默认：0.99，仅custom_rmsprop生效）"
+    )
+    parser.add_argument(
+        "--rmsprop_eps",
+        type=float,
+        default=1e-8,
+        help="CustomRMSprop的数值稳定项（默认：1e-8，仅custom_rmsprop生效）"
+    )
+
+    # CustomMomentum 专属参数
+    parser.add_argument(
+        "--momentum_dampening",
+        type=float,
+        default=0.0,
+        help="CustomMomentum的阻尼系数（默认：0.0，仅custom_momentum生效）"
+    )
+
+    # -------------------------- 模型子命令（原有逻辑不变） --------------------------
     subparsers = parser.add_subparsers(
-        dest="model_type",  # 用 dest 存储选择的模型类型（mlp/transformer）
+        dest="model_type",
         required=True,
         help="模型类型选择（mlp / transformer）"
     )
-    
-    # MLP 子命令 + 专属参数
     mlp_parser = subparsers.add_parser("mlp", help="MLP 模型训练（支持 onehot/embedding 编码）")
     mlp_parser = TrainableMLP.add_model_specific_args(mlp_parser)
-    
-    # Transformer 子命令 + 专属参数
     transformer_parser = subparsers.add_parser("transformer", help="Transformer 模型训练（固定 embedding 编码）")
     transformer_parser = TrainableTransformer.add_model_specific_args(transformer_parser)
     
     return parser
 
 # ==============================================================================
-# 统一训练逻辑
+# 其余逻辑（save_hparams、train、主入口）保持不变，无需修改
 # ==============================================================================
 def save_hparams(hparams: Namespace, save_path: str) -> None:
     """保存超参数"""
@@ -187,9 +154,6 @@ def train(hparams: Namespace):
     print(f"测试损失：{test_logs['test_loss']:.4f}")
     print(f"测试准确率：{test_logs['test_accuracy']:.2f}%")
 
-# ==============================================================================
-# 主入口
-# ==============================================================================
 if __name__ == "__main__":
     parser = add_args()
     args = parser.parse_args()

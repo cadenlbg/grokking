@@ -1,0 +1,7 @@
+{
+  "model_type": "mlp",
+  "encoding": "onehot",
+  "test_loss": 0.02793092094361782,
+  "test_accuracy": 99.00814819335938,
+  "test_perplexity": 1.0283246040344238
+}

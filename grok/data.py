@@ -536,13 +536,13 @@ class ArithmeticIterator(torch.utils.data.IterableDataset):
         """
 
         if batchsize_hint == -1:
-            return ds_size
+            return int(ds_size)
         elif batchsize_hint == 0:
-            return min(512, math.ceil(ds_size / 2.0))
+            return int(min(512, math.ceil(ds_size / 2.0)))
         elif (batchsize_hint > 0) and (batchsize_hint < 1):
-            return math.ceil(ds_size * batchsize_hint)
+            return int(math.ceil(ds_size * batchsize_hint))
         elif batchsize_hint > 1:
-            return min(batchsize_hint, ds_size)
+            return int(min(batchsize_hint, ds_size))
         else:
             raise ValueError("batchsize_hint must be >= -1")
 
@@ -571,6 +571,7 @@ class ArithmeticIterator(torch.utils.data.IterableDataset):
         if batch_begin > len(self.dataset) - 1:
             self.reset_iteration()
             raise StopIteration
+        batchsize_int = int(self.batchsize)
         indices = self.permutation[batch_begin : batch_begin + self.batchsize]
         text = self.dataset.data[indices, :-1]
         target = self.dataset.data[indices, 1:]
