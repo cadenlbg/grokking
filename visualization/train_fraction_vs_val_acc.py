@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 """
-绘制单张「训练数据占比 vs 最佳验证准确率」图
-配套统一可视化入口脚本，实现add_parser和main方法
+绘制单张「训练数据占比 vs 最佳验证准确率」图（限定10w steps以内最大值）
+优化：固定Y轴上限为102，清晰展示接近100%的区域（无局部放大）
 """
 import os
 import yaml
@@ -12,9 +12,9 @@ import matplotlib.ticker as mtick
 import argparse
 from typing import List, Tuple
 
-# ===================== 辅助函数：加载实验数据 =====================
+# ===================== 辅助函数：加载实验数据（无修改） =====================
 def load_single_exp_data(exp_dir: str) -> Tuple[float, float]:
-    """加载单个实验的“训练数据占比”和“最佳验证准确率”"""
+    """加载单个实验的“训练数据占比”和“10w steps以内最佳验证准确率”"""
     try:
         # 读取hparams.yaml中的train_data_pct（转为小数）
         hparams_path = os.path.join(exp_dir, "hparams.yaml")
@@ -22,7 +22,7 @@ def load_single_exp_data(exp_dir: str) -> Tuple[float, float]:
             hparams = yaml.safe_load(f)
         train_data_fraction = hparams["train_data_pct"] / 100.0
 
-        # 读取metrics文件中的最佳val_accuracy
+        # 读取metrics文件中的最佳val_accuracy（限定10w steps以内）
         metrics_dir = os.path.join(exp_dir, "metrics")
         metrics_files = [f for f in os.listdir(metrics_dir) if f.endswith(".csv")]
         if not metrics_files:
@@ -30,7 +30,19 @@ def load_single_exp_data(exp_dir: str) -> Tuple[float, float]:
         
         metrics_path = os.path.join(metrics_dir, metrics_files[0])
         df = pd.read_csv(metrics_path)
-        best_val_acc = df["val_accuracy"].max()
+
+        # 关键修改：过滤出10w steps及以内的数据（默认列名为"step"，若你的列名不同可自行修改）
+        max_step_limit = 100000  # 10w steps
+        if "global_step" not in df.columns:
+            raise KeyError(f"metrics文件 {metrics_path} 中无'global_step'列，请确认列名是否正确（如'epoch'）")
+
+        # 过滤数据：仅保留global_step <= 100000的记录
+        df_filtered = df[df["global_step"] <= max_step_limit]
+        if df_filtered.empty:
+            raise ValueError(f"过滤后（global_step <= {max_step_limit}）无有效数据")
+
+        # 取过滤后的数据最大值
+        best_val_acc = df_filtered["val_accuracy"].max()
 
         return (train_data_fraction, best_val_acc)
     except Exception as e:
@@ -53,7 +65,7 @@ def load_single_config_data(config_dir: str) -> List[Tuple[float, float]]:
     config_data.sort(key=lambda x: x[0])  # 按训练数据占比从小到大排序
     return config_data
 
-# ===================== 核心函数：绘制单张独立图 =====================
+# ===================== 核心函数：绘制单张独立图（固定Y轴上限为102，无局部放大） =====================
 def plot_single_chart(
     data: List[Tuple[float, float]],
     chart_title: str,
@@ -62,10 +74,8 @@ def plot_single_chart(
 ) -> None:
     """
     绘制单张“训练数据占比 vs 最佳验证准确率”独立图
-    :param data: 单配置实验数据，格式[(训练数据占比, 最佳验证准确率), ...]
-    :param chart_title: 单张图标题（建议为配置名称）
-    :param save_path: 单张图保存路径（支持绝对路径/相对路径）
-    :param figsize: 单张图尺寸，默认(5,4)（适配后续网格拼接）
+    固定Y轴上限为102，预留顶部空间，清晰展示接近100%的区域
+    无局部放大，保持简洁
     """
     # 创建单张图画布
     fig, ax = plt.subplots(1, 1, figsize=figsize)
@@ -74,21 +84,21 @@ def plot_single_chart(
     if data:
         fractions = [d[0] for d in data]
         accuracies = [d[1] for d in data]
-        # 浅灰散点（原始数据）+ 蓝色折线（趋势）
+        # 绘制散点和折线（样式不变）
         ax.scatter(fractions, accuracies, color="#cccccc", s=15, alpha=0.8)
         ax.plot(fractions, accuracies, color="#1e88e5", linewidth=2)
     else:
         ax.text(0.5, 0.5, "无有效数据", ha="center", va="center", transform=ax.transAxes)
 
-    # 单张图样式配置（统一风格，确保拼接后美观）
+    # 单张图样式配置（核心修改：固定Y轴范围 0~102）
     ax.set_title(chart_title, fontsize=10, fontweight="bold")
     ax.set_xlim(0.2, 0.8)  # 固定x轴范围（20%~80%训练数据占比）
-    ax.set_ylim(0, 100)    # 固定y轴范围（0~100%验证准确率）
+    ax.set_ylim(0, 102)    # 核心优化：固定Y轴上限为102，预留2%空间，避免100%贴顶
     # x轴显示为百分比格式（0.5 → 50%）
     ax.xaxis.set_major_formatter(mtick.PercentFormatter(xmax=1.0))
     ax.grid(True, which="both", alpha=0.3, linestyle="--")  # 网格线增强可读性
     ax.set_xlabel("Training data fraction", fontsize=9)
-    ax.set_ylabel("Best validation accuracy", fontsize=9)
+    ax.set_ylabel("Best validation accuracy (≤10w steps)", fontsize=9)  # 标注10w steps限制
 
     # 保存图片并关闭画布（释放内存，避免内存泄漏）
     os.makedirs(os.path.dirname(save_path), exist_ok=True)  # 自动创建保存目录
@@ -97,7 +107,7 @@ def plot_single_chart(
     plt.close(fig)
     print(f"✅ 单张图已成功保存至：{save_path}")
 
-# ===================== Parser配置：适配统一入口脚本 =====================
+# ===================== Parser配置：适配统一入口脚本（无修改） =====================
 def add_parser(subparsers):
     """
     为当前工具添加命令行参数（适配统一可视化入口脚本）
@@ -105,7 +115,7 @@ def add_parser(subparsers):
     """
     parser = subparsers.add_parser(
         "train_fraction_vs_val_acc",
-        help="绘制单张「训练数据占比 vs 最佳验证准确率」趋势图",
+        help="绘制单张「训练数据占比 vs 10w steps以内最佳验证准确率」趋势图",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter
     )
     # 必选参数
@@ -141,7 +151,7 @@ def add_parser(subparsers):
         help="单张图的高度（默认：4）"
     )
 
-# ===================== 主函数：执行绘制逻辑 =====================
+# ===================== 主函数：执行绘制逻辑（无修改） =====================
 def main(args):
     """
     工具主执行函数（适配统一可视化入口脚本）

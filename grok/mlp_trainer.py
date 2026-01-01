@@ -162,13 +162,33 @@ class TrainableMLP:
             help="Embedding 编码维度（仅 encoding=embedding 时生效）"
         )
         
+        #k加法
+        parser.add_argument("--k", type=int, default=2, help="k个数相加的个数（k≥2，对应k加法取模任务）")
+
         return parser
 
     def prepare_data(self) -> None:
+        #兼容k加法
+        user_specified_op = self.hparams.math_operator
+        # 定义默认二元加法操作符
+        default_binary_op = "+"
+
+        # 2. 核心逻辑：当且仅当k≥3，且用户未手动指定操作符时，自动构造k加法操作符
+        if user_specified_op == default_binary_op or user_specified_op is None:
+            # 当k≥3时，自动启动k加法
+            if self.hparams.k >= 3:
+                math_operator = f"+{self.hparams.k}_mod_97"
+            # 当k=2时，保持原有二元加法
+            else:
+                math_operator = default_binary_op
+        # 3. 若用户手动指定了操作符（非默认值），优先使用用户指定的值
+        else:
+            math_operator = user_specified_op
+
         """加载数据集"""
         (self.train_dataset, self.val_dataset,) = ArithmeticDataset.splits(
             train_pct=self.hparams.train_data_pct,
-            operator=self.hparams.math_operator,
+            operator=math_operator,
             operand_length=self.hparams.operand_length,
             data_dir=self.hparams.datadir,
             use_mask=self.hparams.use_mask,
@@ -309,7 +329,7 @@ class TrainableMLP:
             headers = [
                 "epoch", "global_step", "train_loss", "train_accuracy", 
                 "train_perplexity", "learning_rate", "val_loss", "val_accuracy",
-                "val_perplexity", "model_type", "encoding"
+                "val_perplexity", "model_type", "encoding","k_value"
             ]
             with open(self.log_file, "w") as f:
                 f.write(",".join(headers) + "\n")
@@ -453,6 +473,7 @@ class TrainableMLP:
                     "global_step": self.global_step,
                     "model_type": "mlp",
                     "encoding": self.hparams.encoding,
+                    "k_value": self.hparams.k,
                     **train_logs,
                     **val_logs
                 }

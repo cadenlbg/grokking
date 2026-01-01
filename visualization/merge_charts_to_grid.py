@@ -113,7 +113,7 @@ def add_parser(subparsers):
     )
     # 必选参数
     parser.add_argument(
-        "--single-charts-dir", "-d",
+        "--single-charts-dir", "-i",
         required=True,
         type=str,
         help="单张图的存放目录（如：my_visualization/single_charts）"
@@ -126,7 +126,7 @@ def add_parser(subparsers):
     )
     # 可选参数
     parser.add_argument(
-        "--global-title", "-g",
+        "--global-title", "-t",
         type=str,
         default="Training Data Fraction vs Best Validation Accuracy",
         help="网格大图的全局标题"

@@ -34,7 +34,12 @@ def add_args() -> ArgumentParser:
     parser.add_argument("--use_mask", action="store_true", default=False, help="按标签拆分数据集")
     parser.add_argument("--train_data_pct", type=float, default=5, help="训练集占比（%）")
     parser.add_argument("--datadir", type=str, default=DEFAULT_DATA_DIR, help="数据集目录")
-    
+    parser.add_argument(
+        "--k",
+        type=int,
+        default=2,
+        help="相加项的个数（k≥2，当k≥3时自动启用k个数相加功能，默认k=2为二元加法）"
+    )
     # 训练相关公共参数
     parser.add_argument("--batchsize", type=float, default=0, help="批次大小配置（-1=全量，0=自动计算，0<N<1=比例，N>1=固定值）")
     parser.add_argument("--max_context_len", type=int, default=50, help="最大序列长度")

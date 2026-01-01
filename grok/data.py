@@ -44,6 +44,8 @@ VALID_OPERATORS = {
     "sort": "sort",
     "reverse": "reverse",
     "copy": "copy",
+    #k个数相加
+    "+k_mod_97": "k-addition_mod_97",
 }
 #序列开始结束标记,=,模数97,数字列表
 EOS_TOKEN = "<|eos|>"
@@ -215,6 +217,7 @@ class ArithmeticDataset:
         operand_length: Optional[int] = None,
         data_dir: str = DEFAULT_DATA_DIR,
         use_mask: bool = False,  # 新增：接收mask开关
+        k=None
     ):
         """
         Creates training and validation datasets
@@ -227,8 +230,8 @@ class ArithmeticDataset:
         assert (0 < train_pct) and (train_pct < 100)
         # 生成名称
         ds_name = cls.get_dsname(operator, operand_length)
-        # 生成所有等式
-        eqs = cls.make_data(operator, operand_length)
+        # 生成所有等式（传入k参数）
+        eqs = cls.make_data(operator, operand_length, k=k)
         # 创建临时tokenizer用于解析标签（仅mask启用时需要）
         tokenizer = ArithmeticTokenizer(data_dir)
 
@@ -268,7 +271,7 @@ class ArithmeticDataset:
         :param data: 输入数据（等式文本列表 或 Token ID张量）
         :param train: 是否为训练集（影响后续迭代器的洗牌逻辑）
         :param data_dir: 分词器词汇表存储路径
-    """
+        """
 
         self.tokenizer = ArithmeticTokenizer(data_dir)
         self.name = name
@@ -283,14 +286,6 @@ class ArithmeticDataset:
         :returns: total number of equations in this dataset
         """
         return self.data.shape[0]
-
-    # @classmethod
-    # def _render(cls, operand):
-    #    return render(operand, join_str=" ")
-    #
-    # @classmethod
-    # def _render_eq(parts):
-    #    return " ".join(map(render, parts))
 
     @classmethod
     def _make_binary_operation_data(cls, operator: str, operands=None) -> List[str]:
@@ -311,9 +306,6 @@ class ArithmeticDataset:
             operands = operands or NUMS
             tuples = itertools.product(operands, repeat=2)
 
-        # if operator == "s5":
-        #     print("elems", list(elems))
-        #     print("tuples", list(tuples))
         eqs = []
         for a, b in tuples:
             if operator == "/":
@@ -347,13 +339,7 @@ class ArithmeticDataset:
             eq = " ".join(map(render, [a, operator, b, "=", c]))
             eqs.append(eq)
 
-        # if operator == "s5":
-        #     print("eqs", eqs)
         return eqs
-
-    # @staticmethod
-    # def _render_unop_example(operator, lhs, rhs):
-    #    return " ".join([operator, render(lhs), "=", render(rhs)])
 
     @staticmethod
     def _make_unary_operation_data(operator: str, operands: Tensor) -> List[str]:
@@ -389,21 +375,38 @@ class ArithmeticDataset:
                 eqs = executor.map(func, tqdm(zip(operands, rhs), total=num_examples))
 
         return eqs
+    
+    @staticmethod
+    def _make_kary_addition_mod_data(
+        k: int, 
+        modulus: int = MODULUS, 
+        operands: Optional[List[int]] = None
+    ) -> List[str]:
+        """
+        生成k个数相加后取模的等式数据集（兼容原有格式）
+        :param k: 相加的数的个数（k ≥ 2）
+        :param modulus: 取模的模数（默认97，与全局MODULUS一致）
+        :param operands: 运算数的可选列表（默认使用0~modulus-1的整数）
+        :return: 等式字符串列表（格式："a1 + a2 + ... + ak = c <|eos|>"，c为和取模结果）
+        """
+        # 确定运算数范围（默认0~modulus-1）
+        operands = operands or list(range(modulus))
+        # 生成所有k个数的笛卡尔积（即所有可能的k元组合）
+        k_tuples = itertools.product(operands, repeat=k)
+        eqs = []
 
-    # @staticmethod
-    # def _make_s5_data(abstract=False) -> List[str]:
-    #    elems = itertools.permutations([0, 1, 2, 3, 4])
-    #    pairs = itertools.product(elems, repeat=2)
-    #    eqs = []
-    #    for a, b in pairs:
-    #        a = np.array(a)
-    #        b = np.array(b)
-    #        c = b[a]
-    #        eq = " ".join(map(render, (a, "s5", b, "=", c)))
-    #        eq = cls._render_eq([a, , b, "=", c])
-    #        eqs.append(eq)
-    #
-    #    return eqs
+        for k_operands in k_tuples:
+            # 计算k个数的和并取模
+            sum_result = sum(k_operands) % modulus
+            # 渲染等式：a1 + a2 + ... + ak = sum_result（保持原有空格分隔格式）
+            operand_strs = [render(op) for op in k_operands]
+            # 拼接操作数和"+"号（如 "1 + 2 + 3"）
+            lhs_str = " + ".join(operand_strs)
+            # 拼接完整等式（与原有二元运算格式一致）
+            eq_str = f"{lhs_str} = {render(sum_result)}"
+            eqs.append(eq_str)
+
+        return eqs
 
     @classmethod
     #生成标准化数据集名称（如“addition_length-2_noise-50”），用于数据集文件命名和管理。
@@ -434,51 +437,46 @@ class ArithmeticDataset:
 
     @classmethod
     #功能：接收运算类型，自动判断调用“二元运算生成”或“一元运算生成”方法，同时支持数据洗牌、噪声注入，返回带EOS标记的等式列表。
-    def make_data(cls, operator, operands=None, shuffle=True, seed=0) -> List[str]:
+    def make_data(cls, operator, operand_length=None, operands=None, shuffle=True, seed=0, k: int = 2) -> List[str]:
         operator, noise_level = cls._get_operator_and_noise_level(operator)
         assert operator in VALID_OPERATORS
         
-        # 根据运算类型调用相应的数据生成方法
-        if operator not in ["sort", "reverse", "copy"]:
-            data = cls._make_binary_operation_data(operator)
+        # 判断是否为k元加法取模操作（优先处理，避免分支冲突）
+        is_kary_addition = operator == "+k_mod_97"
+        data = []
+
+        # 分支1：k元加法取模
+        if is_kary_addition:
+            data = cls._make_kary_addition_mod_data(k=k, modulus=MODULUS, operands=operands)
+        # 分支2：二元运算（非k元、非列表运算）
+        elif operator not in ["sort", "reverse", "copy"]:
+            data = cls._make_binary_operation_data(operator, operands=operands)
+        # 分支3：一元列表运算
         else:
-            data = cls._make_unary_operation_data(operator, operands)
+            # 生成列表操作数（基于operand_length）
+            if operand_length is None:
+                operand_length = 2  # 默认列表长度
+            lists = cls._make_lists(sizes=[operand_length], nums=NUMS)
+            data = cls._make_unary_operation_data(operator, operands=lists[operand_length])
         
         # 数据洗牌
         rng = np.random.RandomState(seed=seed)
-        if shuffle:
+        if shuffle and len(data) > 0:
             rng.shuffle(data)
         
         # 噪声注入
-        if noise_level > 0:
-            random_answer_eqns = rng.choice(data, size=noise_level)
+        if noise_level > 0 and len(data) > 0:
+            random_answer_eqns = rng.choice(data, size=min(noise_level, len(data)))
             random_answers = [
                 random_eq.split(" = ")[1] for random_eq in random_answer_eqns
             ]
-            for i in range(noise_level):
+            for i in range(min(noise_level, len(data))):
                 data[i] = data[i].split(" = ")[0] + " = " + random_answers[i]
         
         # 添加EOS标记
-        data = [EOS_TOKEN + " " + eq + " " + EOS_TOKEN for eq in data]
+        data = [f"{EOS_TOKEN} {eq} {EOS_TOKEN}" for eq in data]
 
         return data
-
-    # @classmethod
-    # def create_data_file(
-    #    cls, operator, operand_length=None, shuffle=True, data_dir=DEFAULT_DATA_DIR
-    # ):
-    #    if VALID_OPERATORS[operator]["binary_eval"]:
-    #        cls.write_dataset(
-    #            cls.make_binary_operation_data(operator), paths["ds_file"]
-    #        )
-    #
-    #    pass
-
-    # @classmethod
-    # def write_dataset(eqs: List[str], ds_file: str):
-    #    print(f"-> writing {ds_file}", flush=True)
-    #    with open(ds_file, "w") as fh:
-    #        fh.writelines([EOS_TOKEN + " " + eq + " " + EOS_TOKEN + "\n" for eq in eqs])
 
     @classmethod
     # 构建所有可能的数字列表组合生成列表操作数（如长度为2的数字排列列表），为一元运算提供输入数据。

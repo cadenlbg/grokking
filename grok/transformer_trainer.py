@@ -77,13 +77,24 @@ class TrainableTransformer:
         return parser
 
     def prepare_data(self) -> None:
+        user_specified_op = self.hparams.math_operator
+        default_binary_op = "+"
+        math_operator = user_specified_op
+        k_value = None
+        if hasattr(self.hparams, "k"):
+            k_value = self.hparams.k
+            if (user_specified_op == default_binary_op) and (k_value >= 3):
+                math_operator = "+k_mod_97"  # 直接用合法操作符，不再构造+3_mod_97
+                print(f"自动启用k加法：k={k_value}，操作符已切换为'{math_operator}'")
+
         """加载数据集"""
         (self.train_dataset, self.val_dataset,) = ArithmeticDataset.splits(
             train_pct=self.hparams.train_data_pct,
-            operator=self.hparams.math_operator,
+            operator=math_operator,
             operand_length=self.hparams.operand_length,
             data_dir=self.hparams.datadir,
             use_mask=self.hparams.use_mask,
+            k=k_value
         )
 
     def train_dataloader(self) -> ArithmeticIterator:
@@ -165,7 +176,7 @@ class TrainableTransformer:
             headers = [
                 "epoch", "global_step", "train_loss", "train_accuracy", 
                 "train_perplexity", "learning_rate", "val_loss", "val_accuracy",
-                "val_perplexity", "model_type", "encoding"
+                "val_perplexity", "model_type", "encoding","k_value"
             ]
             with open(self.log_file, "w") as f:
                 f.write(",".join(headers) + "\n")
@@ -304,6 +315,7 @@ class TrainableTransformer:
                     "global_step": self.global_step,
                     "model_type": "transformer",
                     "encoding": "embedding",  # Transformer 固定用 Embedding
+                    "k_value": self.hparams.k,
                     **train_logs,
                     **val_logs
                 }
