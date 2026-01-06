@@ -20,28 +20,28 @@ from grok.optimizer import CustomAdamW
 # 统一参数解析（重构：全局参数 + 子命令（mlp/transformer））
 # ==============================================================================
 def add_args() -> ArgumentParser:
-    parser = ArgumentParser(description="统一训练入口（MLP/Transformer + One-Hot/Embedding）")
+    parser = ArgumentParser(description="统一训练入口(MLP/Transformer + One-Hot/Embedding)")
     
     # -------------------------- 全局公共参数（所有模型共享） --------------------------
     # （原有参数保持不变）
     parser.add_argument("--random_seed", type=int, default=-1, help="随机种子（-1 不固定）")
-    parser.add_argument("--gpu", type=int, default=0, help="GPU 卡号（-1 用 CPU）")
+    parser.add_argument("--gpu", type=int, default=0, help="GPU 卡号（-1 用 CPU)")
     parser.add_argument("--max_steps", type=int, default=100000, help="最大训练步数")
     
     # 数据相关公共参数
     parser.add_argument("--math_operator", type=str, default="+", choices=VALID_OPERATORS, help="算术运算符")
     parser.add_argument("--operand_length", type=int, help="操作数长度（适用于多位数运算）")
     parser.add_argument("--use_mask", action="store_true", default=False, help="按标签拆分数据集")
-    parser.add_argument("--train_data_pct", type=float, default=5, help="训练集占比（%）")
+    parser.add_argument("--train_data_pct", type=float, default=5, help="训练集占比")
     parser.add_argument("--datadir", type=str, default=DEFAULT_DATA_DIR, help="数据集目录")
     parser.add_argument(
         "--k",
         type=int,
         default=2,
-        help="相加项的个数（k≥2，当k≥3时自动启用k个数相加功能，默认k=2为二元加法）"
+        help="相加项的个数(k≥2,当k≥3时自动启用k个数相加功能,默认k=2为二元加法)"
     )
     # 训练相关公共参数
-    parser.add_argument("--batchsize", type=float, default=0, help="批次大小配置（-1=全量，0=自动计算，0<N<1=比例，N>1=固定值）")
+    parser.add_argument("--batchsize", type=float, default=0, help="批次大小配置（-1=全量,0=自动计算,0<N<1=比例,N>1=固定值）")
     parser.add_argument("--max_context_len", type=int, default=50, help="最大序列长度")
     parser.add_argument("--dropout", type=float, default=0.0, help=" dropout 概率")
     parser.add_argument("--warmup_steps", type=int, default=10, help="学习率预热步数")
@@ -59,7 +59,7 @@ def add_args() -> ArgumentParser:
         type=str,
         default="adamw",
         choices=["adamw", "custom_sgd", "custom_rmsprop", "custom_momentum"],
-        help="选择训练使用的优化器（默认：adamw，支持：custom_sgd、custom_rmsprop、custom_momentum）"
+        help="选择训练使用的优化器（默认:adamw,支持:custom_sgd、custom_rmsprop、custom_momentum)"
     )
 
     # ========== 各自定义优化器的可调参数 ==========
@@ -68,13 +68,13 @@ def add_args() -> ArgumentParser:
         "--sgd_momentum",
         type=float,
         default=0.9,
-        help="CustomSGD/CustomMomentum的动量系数（默认：0.9，仅对应优化器生效）"
+        help="CustomSGD/CustomMomentum的动量系数(默认:0.9,仅对应优化器生效）"
     )
     parser.add_argument(
         "--sgd_nesterov",
         action="store_true",
         default=False,
-        help="CustomSGD是否使用Nesterov动量（默认：False，仅custom_sgd生效）"
+        help="CustomSGD是否使用Nesterov动量(默认:False,仅custom_sgd生效)"
     )
 
     # CustomRMSprop 专属参数
@@ -82,13 +82,13 @@ def add_args() -> ArgumentParser:
         "--rmsprop_alpha",
         type=float,
         default=0.99,
-        help="CustomRMSprop的移动平均衰减系数（默认：0.99，仅custom_rmsprop生效）"
+        help="CustomRMSprop的移动平均衰减系数(默认:0.99,仅custom_rmsprop生效)"
     )
     parser.add_argument(
         "--rmsprop_eps",
         type=float,
         default=1e-8,
-        help="CustomRMSprop的数值稳定项（默认：1e-8，仅custom_rmsprop生效）"
+        help="CustomRMSprop的数值稳定项(默认:1e-8,仅custom_rmsprop生效)"
     )
 
     # CustomMomentum 专属参数
@@ -96,14 +96,14 @@ def add_args() -> ArgumentParser:
         "--momentum_dampening",
         type=float,
         default=0.0,
-        help="CustomMomentum的阻尼系数（默认：0.0，仅custom_momentum生效）"
+        help="CustomMomentum的阻尼系数(默认:0.0,仅custom_momentum生效)"
     )
 
     # -------------------------- 模型子命令（原有逻辑不变） --------------------------
     subparsers = parser.add_subparsers(
         dest="model_type",
         required=True,
-        help="模型类型选择（mlp / transformer）"
+        help="模型类型选择(mlp / transformer)"
     )
     mlp_parser = subparsers.add_parser("mlp", help="MLP 模型训练（支持 onehot/embedding 编码）")
     mlp_parser = TrainableMLP.add_model_specific_args(mlp_parser)
@@ -131,7 +131,7 @@ def train(hparams: Namespace):
     if hparams.model_type == "mlp":
         print(f"编码方式：{hparams.encoding}")
     else:
-        print(f"编码方式：embedding（Transformer 固定）")
+        print(f"编码方式:embedding(transformer 固定）")
     
     # 保存超参数
     save_hparams(hparams, os.path.join(hparams.logdir, "hparams.yaml"))
@@ -155,7 +155,7 @@ def train(hparams: Namespace):
     # 训练和测试
     model.fit()
     test_logs = model.test()
-    print(f"\n测试完成！")
+    print(f"\n测试完成!")
     print(f"测试损失：{test_logs['test_loss']:.4f}")
     print(f"测试准确率：{test_logs['test_accuracy']:.2f}%")
 
@@ -168,12 +168,12 @@ if __name__ == "__main__":
         ignore_args = ["encoding", "embedding_dim", "mlp_hidden_dims"]
         for arg in ignore_args:
             if hasattr(args, arg) and getattr(args, arg) is not None:
-                print(f"警告：Transformer 不使用 --{arg} 参数，已忽略")
+                print(f"警告:Transformer 不使用 --{arg} 参数，已忽略")
     elif args.model_type == "mlp":
         ignore_args = ["n_layers", "n_heads", "d_model", "weight_noise", "non_linearity", "save_activations", "save_outputs"]
         for arg in ignore_args:
             if hasattr(args, arg) and getattr(args, arg) is not None:
-                print(f"警告：MLP 不使用 --{arg} 参数，已忽略")
+                print(f"警告:MLP 不使用 --{arg} 参数，已忽略")
     
     # 启动训练
     train(args)
