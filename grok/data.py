@@ -9,51 +9,24 @@ from torch import Tensor, LongTensor
 import numpy as np
 from typing import Tuple, List, Dict, Any, Union, Optional
 from tqdm import tqdm
-from concurrent.futures import ProcessPoolExecutor
 
-from sympy.combinatorics.permutations import Permutation
 from mod import Mod
 
 import blobfile as bf
 
-#先给出所有支持的操作符及其名称
+# ===================== 仅保留【加法相关】算子 =====================
 VALID_OPERATORS = {
-    # 加减乘除
+    # 二元加法（基础）
     "+": "addition",
-    "-": "subtraction",
-    "*": "muliplication",
-    "/": "division",
-    # 幂运算和多项式
-    "**2+": "squarepoly",
-    "**3+": "cubepoly",
-    "x**2+y**2_mod_97": "quad1",
-    "x**2+y**2+x*y_mod_97": "quad2",
-    "x**2+y**2+x*y+x_mod_97": "quad3",
-    "x**3+x*y_mod_97": "cube1",
-    "x**3+x*y**2+y_mod_97": "cube2",
-    # 混合运算
-    "(x._value//y)if(y._value%2==1)else(x-y)_mod_97": "mix1",
-    # 对称S5群的置换运算
-    "s5": "s5",
-    "s5conj": "s5conj",
-    "s5aba": "s5aba",
-    # 奇偶分支运算
-    "+*": "even-addition_odd-multiplication",
-    "+-": "even-addition_odd-subtraction",
-    # 列表运算
-    "sort": "sort",
-    "reverse": "reverse",
-    "copy": "copy",
-    #k个数相加
+    # K元加法取模（核心保留，兼容k≥2）
     "+k_mod_97": "k-addition_mod_97",
 }
-#序列开始结束标记,=,模数97,数字列表
+
+# 固定常量
 EOS_TOKEN = "<|eos|>"
 EQ_TOKEN = "="
-MODULUS = 97
-NUMS = list(range(MODULUS))
-
-#默认数据目录
+MODULUS = 97  # 兜底默认值，实际使用 train.py传入的--modulus参数
+NUMS = list(range(MODULUS)) # 兜底数字列表，实际动态生成
 DEFAULT_DATA_DIR = "data"
 
 # 把不同操作数或对象渲染成字符串
@@ -64,8 +37,6 @@ def render(operand, join_str=""):
         or isinstance(operand, np.ndarray)
     ):
         return join_str.join(map(render, operand))
-    elif isinstance(operand, Permutation):
-        return "".join(map(str, operand.array_form))
     elif isinstance(operand, Mod):
         return str(operand._value)
     else:
@@ -79,18 +50,11 @@ def create_data_files(data_dir: str = DEFAULT_DATA_DIR):
 # 词法分析器类,用于存储token文本到token id的映射并进行转换
 class ArithmeticTokenizer:
     """Stores the list of token text to token id mappings and converts between them"""
-    ''' 初始化流程：
-        1. 确定词汇表文件路径
-        → 2. 调用get_tokens()生成词汇表（itos）
-         → 3. 基于itos构建反向映射stoi。'''
-    
     token_file = "tokens.txt"
 
     def __init__(self, data_dir=DEFAULT_DATA_DIR) -> None:
         self.token_file = bf.join(data_dir, self.token_file)
-        # 列表: token id到token文本的映射
         self.itos = self.get_tokens()
-        # 字典: token文本到token id的映射
         self.stoi: Dict[str, int] = dict([(s, i) for i, s in enumerate(self.itos)])
     
     # 正向翻译: 文本→id
@@ -98,13 +62,6 @@ class ArithmeticTokenizer:
         return LongTensor([self.stoi[t] for t in s.split(" ")])
 
     def encode(self, obj: Union[str, List]) -> Tensor:
-        """
-        Convert a string of text into a rank-1 tensor of token ids
-        or convert a list of strings of text into a rank-2 tensor of token ids
-
-        :param obj: the string or list of strings to convert
-        :returns: a tensor of the token ids
-        """
         if isinstance(obj, str):
             return self._encode(obj)
         elif isinstance(obj, list):
@@ -114,14 +71,6 @@ class ArithmeticTokenizer:
     
     # 反向翻译: id→文本
     def decode(self, tensor: Tensor, with_brackets: bool = False) -> str:
-        """
-        Convert a tensor of token ids into a string of text
-
-        :param tensor: a tensor of the token ids
-        :param with_brackets: if true, the returned string will include <> brackets
-                              around the text corresponding to each token.
-        :returns: string of these tokens.
-        """
         indices = tensor.long()
         if with_brackets:
             l = "<"
@@ -133,128 +82,92 @@ class ArithmeticTokenizer:
         return " ".join(tokens)
 
     def __len__(self) -> int:
-        """
-        :returns: the number of tokens in this vocabulary
-        """
         return len(self.itos)
 
     @classmethod
-    # 构建“全量覆盖”的词汇表
+    # 构建词汇表 - 仅加法相关token，无冗余
     def get_tokens(cls):
         tokens = (
             [EOS_TOKEN, EQ_TOKEN]
             + list(sorted(list(VALID_OPERATORS.keys())))
             + list(map(render, NUMS))
-            + list(map(render, itertools.permutations(range(5))))  # s5
         )
         return tokens
 
 
 class ArithmeticDataset:
-    """A Dataset of arithmetic equations"""
+    """A Dataset of arithmetic equations - 仅加法数据集"""
 
     @staticmethod
     def _extract_label(eq_str: str, tokenizer: ArithmeticTokenizer) -> Optional[int]:
-        """
-        从等式字符串中提取标签（结果），转换为数值（仅处理数值类结果）
-        :param eq_str: 等式字符串（含EOS_TOKEN）
-        :param tokenizer: 分词器（用于解析tokens）
-        :return: 标签数值（非数值结果返回None）
-        """
-        # 去除EOS_TOKEN，分割为tokens
+        """【修复点1：兼容k元加法等式】从等式字符串中提取标签（加法结果），适配任意个+号的等式"""
         eq_clean = eq_str.replace(EOS_TOKEN, "").strip()
         tokens = eq_clean.split(" ")
         if EQ_TOKEN not in tokens:
-            return None  # 无效等式，跳过
+            return None
         
-        # 找到"="后面的部分（标签tokens）
+        # 核心兼容：无论等式左边有多少个+号，只取=后面的所有内容作为标签
         eq_idx = tokens.index(EQ_TOKEN)
         label_tokens = tokens[eq_idx+1:]
         if not label_tokens:
             return None
         
-        # 合并标签tokens，处理不同格式（数字、Mod对象、字符串）
-        label_str = " ".join(label_tokens).strip()
+        label_str = "".join(label_tokens).strip() # 修复：用join无空格，适配k加法的纯数字标签
         try:
-            # 处理纯数字（如"8"）
             return int(label_str)
         except ValueError:
-            # 处理Mod对象（如"Mod(8,97)"）
             if label_str.startswith("Mod(") and label_str.endswith(")"):
                 return int(label_str.split(",")[0].split("(")[1])
-            # 非数值结果（如S5排列"01234"）返回None，不纳入mask过滤
             return None
 
-    # 新增：按mask规则过滤数据
+    # 按mask规则过滤数据：train(label>20) / val(label<20)
     @staticmethod
     def _filter_by_mask(eqs: List[str], tokenizer: ArithmeticTokenizer) -> Tuple[List[str], List[str]]:
-        """
-        按mask规则过滤数据：
-        - train_eqs: 标签 > 20 的等式
-        - val_eqs: 标签 < 20 的等式
-        :return: (train_eqs, val_eqs)
-        """
         train_eqs = []
         val_eqs = []
         for eq in eqs:
             label = ArithmeticDataset._extract_label(eq, tokenizer)
             if label is None:
-                continue  # 非数值结果，不纳入任何集
+                continue
             if label > 20:
                 train_eqs.append(eq)
             elif label < 20:
                 val_eqs.append(eq)
-        # 打印过滤统计信息
         print(f"Mask过滤后：训练集{len(train_eqs)}条（label>20），验证集{len(val_eqs)}条（label<20）")
         return train_eqs, val_eqs
     
     @classmethod
-    # 创建训练集和验证集
+    # 创建训练集和验证集 - 保留动态模数+K参数
     def splits(
         cls,
         train_pct: float,
         operator: str,
         operand_length: Optional[int] = None,
         data_dir: str = DEFAULT_DATA_DIR,
-        use_mask: bool = False,  # 新增：接收mask开关
-        k=None
+        use_mask: bool = False,
+        k=None,
+        modulus: int = MODULUS
     ):
-        """
-        Creates training and validation datasets
-
-        :param train_pct: percentage of total equations used for training data
-        :param operator: The arithmetic operator for this dataset e.g. '+', '-', '*', '/', 'sort'
-        :param operand_length: for list based datasets the length of the lists
-        :returns: (train_dataset, validation_dataset)
-        """
         assert (0 < train_pct) and (train_pct < 100)
-        # 生成名称
         ds_name = cls.get_dsname(operator, operand_length)
-        # 生成所有等式（传入k参数）
-        eqs = cls.make_data(operator, operand_length, k=k)
-        # 创建临时tokenizer用于解析标签（仅mask启用时需要）
+        eqs = cls.make_data(operator, operand_length, k=k, modulus=modulus)
         tokenizer = ArithmeticTokenizer(data_dir)
 
         if use_mask:
-            # 按label过滤得到训练集和验证集
             train_eqs, val_eqs = cls._filter_by_mask(eqs, tokenizer)
-            # 若过滤后训练集/验证集为空，抛出警告
             if not train_eqs:
-                print("警告：mask过滤后训练集为空！请检查数据或调整mask规则")
+                print("警告：mask过滤后训练集为空！")
             if not val_eqs:
-                print("警告：mask过滤后验证集为空！请检查数据或调整mask规则")
+                print("警告：mask过滤后验证集为空！")
         else:
             train_rows, _ = cls.calc_split_len(train_pct, len(eqs))
             train_eqs = eqs[:train_rows]
             val_eqs = eqs[train_rows:]
-        #初始化train_set和val_set实例
+            
         train_ds = cls(ds_name, train_eqs, train=True, data_dir=data_dir)
         val_ds = cls(ds_name, val_eqs, train=False, data_dir=data_dir)
-
         return train_ds, val_ds
 
-
-        
     @classmethod
     # 计算训练集和验证集的划分长度
     def calc_split_len(cls, train_pct, ds_len):
@@ -263,16 +176,6 @@ class ArithmeticDataset:
         return train_rows, val_rows
 
     def __init__(self, name, data: Union[Tensor, List[str]], train, data_dir) -> None:
-        """
-        :param data: A list of equations strings. Each equation must have an '=' in it.
-        """
-        """
-        :param name: 数据集名称（如"addition"）
-        :param data: 输入数据（等式文本列表 或 Token ID张量）
-        :param train: 是否为训练集（影响后续迭代器的洗牌逻辑）
-        :param data_dir: 分词器词汇表存储路径
-        """
-
         self.tokenizer = ArithmeticTokenizer(data_dir)
         self.name = name
         self.train = train
@@ -282,134 +185,44 @@ class ArithmeticDataset:
             self.data = data
 
     def __len__(self) -> int:
-        """
-        :returns: total number of equations in this dataset
-        """
         return self.data.shape[0]
 
     @classmethod
-    def _make_binary_operation_data(cls, operator: str, operands=None) -> List[str]:
-        #先生成所有运算数
-        if operator == "s5":
-            operands = operands or list(range(5))
-            elems = map(np.array, itertools.permutations(operands))
-            tuples = itertools.product(elems, repeat=2)
-        elif operator in ["s5conj", "s5aba"]:
-            operands = operands or list(range(5))
-            elems = map(Permutation, itertools.permutations(operands))
-            tuples = itertools.product(elems, repeat=2)
-        elif "_mod_" in operator:
-            modulo = int(operator.split("_mod_")[-1])
-            elems = [Mod(i, modulo) for i in range(modulo)]
-            tuples = itertools.product(elems, repeat=2)
-        else:
-            operands = operands or NUMS
-            tuples = itertools.product(operands, repeat=2)
-
+    # ===================== 仅保留【二元加法】核心逻辑 =====================
+    def _make_binary_operation_data(cls, operator: str, operands=None, modulus: int = MODULUS) -> List[str]:
+        # 仅处理加法 + 
+        operands = operands or list(range(modulus))
+        tuples = itertools.product(operands, repeat=2)
         eqs = []
         for a, b in tuples:
-            if operator == "/":
-                if b == 0:
-                    continue
-                else:
-                    c = a
-                    a = (b * c) % MODULUS
-            elif operator == "s5":
-                c = b[a]
-            elif operator == "s5conj":
-                c = a * b * (a.__invert__())
-            elif operator == "s5aba":
-                c = a * b * a
-            elif operator == "+*":
-                if a % 2 == 0:
-                    c = (a + b) % MODULUS
-                else:
-                    c = (a * b) % MODULUS
-            elif operator == "+-":
-                if a % 2 == 0:
-                    c = (a + b) % MODULUS
-                else:
-                    c = (a - b) % MODULUS
-            elif "_mod_" in operator:
-                expression = operator.split("_mod_")[0]
-                function = eval(f"lambda x, y: ({expression})")
-                c = function(a, b)
-            else:
-                c = eval(f"({a} {operator} {b}) % {MODULUS}")
+            c = (a + b) % modulus  # 二元加法取模
             eq = " ".join(map(render, [a, operator, b, "=", c]))
             eqs.append(eq)
-
-        return eqs
-
-    @staticmethod
-    def _make_unary_operation_data(operator: str, operands: Tensor) -> List[str]:
-        """
-        :param operator: The unary operator to apply to each operand e.g. '+'
-        :param operands: A tensor of operands
-        :returns: list of equations"""
-        num_examples = len(operands)
-
-        if operator == "sort":
-            rhs = torch.sort(operands, dim=1)[0]
-        elif operator == "reverse":
-            rhs = torch.flip(operands, dims=(1,))
-        elif operator == "copy":
-            rhs = operands
-        else:
-            raise Exception("unsupported operator")
-
-        def func(L, R):
-            L = map(str, L)
-            R = map(str, R)
-            return f"{operator} {' '.join(L)} = {' '.join(R)}"
-
-        if num_examples < 1000000000:
-            eqs = [
-                func(L, R)
-                for L, R in tqdm(
-                    zip(operands.tolist(), rhs.tolist()), total=num_examples
-                )
-            ]
-        else:
-            with ProcessPoolExecutor() as executor:
-                eqs = executor.map(func, tqdm(zip(operands, rhs), total=num_examples))
-
         return eqs
     
     @staticmethod
+    # ===================== 核心保留【K元加法】逻辑 + 【修复点2：关键修复】 =====================
     def _make_kary_addition_mod_data(
         k: int, 
         modulus: int = MODULUS, 
         operands: Optional[List[int]] = None
     ) -> List[str]:
-        """
-        生成k个数相加后取模的等式数据集（兼容原有格式）
-        :param k: 相加的数的个数（k ≥ 2）
-        :param modulus: 取模的模数（默认97，与全局MODULUS一致）
-        :param operands: 运算数的可选列表（默认使用0~modulus-1的整数）
-        :return: 等式字符串列表（格式："a1 + a2 + ... + ak = c <|eos|>"，c为和取模结果）
-        """
-        # 确定运算数范围（默认0~modulus-1）
+        """生成k个数相加后取模的等式数据集（k≥2，兼容二元/多元）【修复：统一等式格式+Mod对象渲染】"""
         operands = operands or list(range(modulus))
-        # 生成所有k个数的笛卡尔积（即所有可能的k元组合）
         k_tuples = itertools.product(operands, repeat=k)
         eqs = []
 
         for k_operands in k_tuples:
-            # 计算k个数的和并取模
             sum_result = sum(k_operands) % modulus
-            # 渲染等式：a1 + a2 + ... + ak = sum_result（保持原有空格分隔格式）
-            operand_strs = [render(op) for op in k_operands]
-            # 拼接操作数和"+"号（如 "1 + 2 + 3"）
+            sum_result_mod = Mod(sum_result, modulus) # 修复：统一用Mod对象，和二元加法格式一致
+            operand_strs = [str(op) for op in k_operands]
             lhs_str = " + ".join(operand_strs)
-            # 拼接完整等式（与原有二元运算格式一致）
-            eq_str = f"{lhs_str} = {render(sum_result)}"
+            # 修复：等式格式统一为「数字 + 数字 + ... = 结果」，和二元加法完全一致的token分割规则
+            eq_str = f"{lhs_str} {EQ_TOKEN} {render(sum_result_mod)}"
             eqs.append(eq_str)
-
         return eqs
 
     @classmethod
-    #生成标准化数据集名称（如“addition_length-2_noise-50”），用于数据集文件命名和管理。
     def get_dsname(cls, operator, operand_length) -> str:
         operator, noise_level = cls._get_operator_and_noise_level(operator)
         ds_name = VALID_OPERATORS[operator]
@@ -420,14 +233,12 @@ class ArithmeticDataset:
         return ds_name
 
     @classmethod
-    # 生成数据集文件路径和名称
     def get_file_path(cls, operator, operand_length=None, data_dir=DEFAULT_DATA_DIR):
         ds_name = cls.get_dsname(operator, operand_length)
         ds_file = bf.join(data_dir, f"{ds_name}_data.txt")
         return ds_file, ds_name
 
     @classmethod
-    # 解析运算类型字符串，提取噪声注入级别
     def _get_operator_and_noise_level(cls, operator):
         if "_noisy" in operator:
             operator, noise_level = operator.split("_noisy_")
@@ -436,65 +247,38 @@ class ArithmeticDataset:
             return operator, 0
 
     @classmethod
-    #功能：接收运算类型，自动判断调用“二元运算生成”或“一元运算生成”方法，同时支持数据洗牌、噪声注入，返回带EOS标记的等式列表。
-    def make_data(cls, operator, operand_length=None, operands=None, shuffle=True, seed=0, k: int = 2) -> List[str]:
+    # ===================== 主数据生成函数 - 仅加法分支 + 【修复点3：兼容k加法的算子名】 =====================
+    def make_data(cls, operator, operand_length=None, operands=None, shuffle=True, seed=0, k: int = 2, modulus: int = MODULUS) -> List[str]:
         operator, noise_level = cls._get_operator_and_noise_level(operator)
-        assert operator in VALID_OPERATORS
+        assert operator in VALID_OPERATORS, f"仅支持加法算子：{VALID_OPERATORS.keys()}"
         
-        # 判断是否为k元加法取模操作（优先处理，避免分支冲突）
-        is_kary_addition = operator == "+k_mod_97"
         data = []
-
-        # 分支1：k元加法取模
-        if is_kary_addition:
-            data = cls._make_kary_addition_mod_data(k=k, modulus=MODULUS, operands=operands)
-        # 分支2：二元运算（非k元、非列表运算）
-        elif operator not in ["sort", "reverse", "copy"]:
-            data = cls._make_binary_operation_data(operator, operands=operands)
-        # 分支3：一元列表运算
-        else:
-            # 生成列表操作数（基于operand_length）
-            if operand_length is None:
-                operand_length = 2  # 默认列表长度
-            lists = cls._make_lists(sizes=[operand_length], nums=NUMS)
-            data = cls._make_unary_operation_data(operator, operands=lists[operand_length])
+        # 分支1：K元加法 (优先级更高)
+        if operator == "+k_mod_97":
+            data = cls._make_kary_addition_mod_data(k=k, modulus=modulus, operands=operands)
+        # 分支2：二元加法
+        elif operator == "+":
+            data = cls._make_binary_operation_data(operator, operands=operands, modulus=modulus)
         
         # 数据洗牌
         rng = np.random.RandomState(seed=seed)
         if shuffle and len(data) > 0:
             rng.shuffle(data)
         
-        # 噪声注入
+        # 噪声注入（保留，按需启用）
         if noise_level > 0 and len(data) > 0:
             random_answer_eqns = rng.choice(data, size=min(noise_level, len(data)))
-            random_answers = [
-                random_eq.split(" = ")[1] for random_eq in random_answer_eqns
-            ]
+            random_answers = [random_eq.split(f" {EQ_TOKEN} ")[1] for random_eq in random_answer_eqns]
             for i in range(min(noise_level, len(data))):
-                data[i] = data[i].split(" = ")[0] + " = " + random_answers[i]
+                data[i] = data[i].split(f" {EQ_TOKEN} ")[0] + f" {EQ_TOKEN} " + random_answers[i]
         
-        # 添加EOS标记
+        # 添加EOS标记 【修复：统一空格分割规则，彻底解决token解析问题】
         data = [f"{EOS_TOKEN} {eq} {EOS_TOKEN}" for eq in data]
-
         return data
-
-    @classmethod
-    # 构建所有可能的数字列表组合生成列表操作数（如长度为2的数字排列列表），为一元运算提供输入数据。
-    def _make_lists(cls, sizes=[2, 3], nums=NUMS):
-        lists: dict = {}
-        for size in sizes:
-            lists[size] = torch.tensor(
-                list(itertools.permutations(nums, r=size)),
-                dtype=torch.int,
-            )
-        return lists
 
 
 class ArithmeticIterator(torch.utils.data.IterableDataset):
-    """
-    An iterator over batches of data in an ArithmeticDataset
-    """
-
+    """数据集迭代器 - 完整保留，兼容批次配置"""
     def __init__(
         self,
         dataset: ArithmeticDataset,
@@ -502,37 +286,13 @@ class ArithmeticIterator(torch.utils.data.IterableDataset):
         batchsize_hint: float = 0,
         shuffle: bool = True,
     ) -> None:
-        """
-        :param dataset: the dataset to iterate over
-        :param device: the torch device to send batches to
-        :param batchsize_hint: * 0 means we use a default batchsize
-                               * -1 means the entire dataset
-                               * float between 0 and 1 means each batch is
-                                 that fraction of the DS
-                               * int > 1 means that specific batch size
-        :param shuffle: whether or not to randomly shuffle the dataset
-        """
         self.dataset = dataset
-        self.batchsize = self.calculate_batchsize(
-            len(dataset), batchsize_hint=batchsize_hint
-        )
+        self.batchsize = self.calculate_batchsize(len(dataset), batchsize_hint=batchsize_hint)
         self.device = device
         self.reset_iteration(shuffle=shuffle)
 
     @staticmethod
     def calculate_batchsize(ds_size: int, batchsize_hint: int = 0) -> int:
-        """
-        Calculates which batch size to use
-
-        :param ds_size: the number of equations in the dataset
-        :param batchsize_hint: * 0 means we use a default batchsize
-                               * -1 means the entire dataset
-                               * float between 0 and 1 means each batch is
-                                 that fraction of the DS
-                               * int > 1 means that specific batch size
-        :returns: the actual batchsize to use
-        """
-
         if batchsize_hint == -1:
             return int(ds_size)
         elif batchsize_hint == 0:
@@ -552,19 +312,9 @@ class ArithmeticIterator(torch.utils.data.IterableDataset):
             self.permutation = torch.arange(len(self.dataset))
 
     def __iter__(self):
-        """
-        :returns: this iterator
-        """
         return self
 
     def __next__(self) -> Dict[str, Tensor]:
-        """
-        Returns one batch of data.
-
-        :raises: StopIteration when we're out of data
-        :returns: batch tensor of shape (self.batchsize, tokens_per_eq)
-        """
-
         batch_begin = self.index * self.batchsize
         if batch_begin > len(self.dataset) - 1:
             self.reset_iteration()
@@ -578,7 +328,4 @@ class ArithmeticIterator(torch.utils.data.IterableDataset):
         return batch
 
     def __len__(self) -> int:
-        """
-        :returns: the total number of batches
-        """
         return math.ceil(len(self.dataset) / self.batchsize)
