@@ -4,7 +4,7 @@ max_steps: 100000
 math_operator: +
 operand_length: null
 use_mask: false
-train_data_pct: 70.0
+train_data_pct: 80.0
 datadir: /root/autodl-tmp/grokking/data
 k: 2
 modulus: 97
@@ -18,7 +18,7 @@ max_lr: 0.005
 weight_decay: 0
 weight_decay_kind: to_zero
 noise_factor: 0
-logdir: /root/autodl-tmp/grokking/my_experiments/sgd_lr0.5x/exp_pct70.0_opadd_steps100000_random_seed42
+logdir: /root/autodl-tmp/grokking/my_experiments/sgd_lr0.5x/exp_pct80.0_opadd_steps100000_random_seed42
 optimizer: custom_sgd
 sgd_momentum: 0.9
 sgd_nesterov: false
