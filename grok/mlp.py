@@ -8,71 +8,57 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch import Tensor
 
-# 复用原代码中的自定义Linear层（支持weight_noise和float32）
+# 自定义线性层 继承原生nn.Linear | 核心特性：强制float32精度 + 训练阶段可添加权重/偏置噪声
 class Linear(nn.Linear):
     def __init__(self, *args, **kwargs):
         self.weight_noise = kwargs.pop("weight_noise", 0.0)
         super().__init__(*args, **kwargs)
-        # 确保权重是float32类型
+        # 强制权重为float32 统一精度避免训练异常
         self.weight = nn.Parameter(self.weight.float())
         if self.bias is not None:
             self.bias = nn.Parameter(self.bias.float())
 
     def forward(self, input: Tensor) -> Tensor:
-        # 确保输入是float32类型
+        # 输入张量强制转float32 与权重精度对齐
         input = input.float()
+        # 训练阶段且噪声系数>0 才给权重/偏置添加高斯噪声 提升泛化性
         if self.weight_noise > 0 and self.training:
-            bias = self.bias if self.bias is None else self.bias + torch.randn_like(self.bias) * self.weight_noise
+            bias = self.bias + torch.randn_like(self.bias) * self.weight_noise if self.bias is not None else None
             weight = self.weight + torch.randn_like(self.weight) * self.weight_noise
         else:
             bias = self.bias
             weight = self.weight
-            
-        return F.linear(
-            input,
-            weight,
-            bias,
-        )
+        # 原生线性层计算逻辑
+        return F.linear(input, weight, bias)
 
-# 复用原代码中的LayerNorm层（支持weight_noise和float32）
+# 自定义层归一化 继承原生nn.LayerNorm | 核心特性：强制float32精度 + 训练阶段可添加权重/偏置噪声
+# 噪声逻辑与自定义Linear层完全一致 保证网络噪声策略统一
 class LayerNorm(nn.LayerNorm):
     def __init__(self, *args, **kwargs):
         self.weight_noise = kwargs.pop("weight_noise", 0.0)
         super().__init__(*args, **kwargs)
-        # 确保权重是float32类型
+        # 强制参数为float32 统一精度标准
         if self.weight is not None:
             self.weight = nn.Parameter(self.weight.float())
         if self.bias is not None:
             self.bias = nn.Parameter(self.bias.float())
 
     def forward(self, input: Tensor) -> Tensor:
-        # 确保输入是float32类型
+        # 输入张量强制转float32 与参数精度对齐
         input = input.float()
+        # 训练态+噪声系数>0 执行噪声注入逻辑
         if self.weight_noise > 0 and self.training:
-            bias = self.bias if self.bias is None else self.bias + torch.randn_like(self.bias) * self.weight_noise
+            bias = self.bias + torch.randn_like(self.bias) * self.weight_noise if self.bias is not None else None
             weight = self.weight + torch.randn_like(self.weight) * self.weight_noise
         else:
             bias = self.bias
             weight = self.weight
-        return F.layer_norm(
-            input,
-            self.normalized_shape,
-            weight,
-            bias,
-            self.eps,
-        )
+        # 原生层归一化计算逻辑
+        return F.layer_norm(input, self.normalized_shape, weight, bias, self.eps)
 
+# 核心网络：可高度自定义配置的多层感知机(MLP)
+# 完全复用上述自定义Linear/LayerNorm层 与Transformer模块的噪声/精度策略完全兼容
 class MLP(nn.Module):
-    """
-    灵活配置的多层MLP
-    支持：
-    - 自定义输入维度、输出维度
-    - 自定义各隐藏层维度（通过列表指定）
-    - 可选的层归一化
-    - weight_noise（与原Transformer代码一致）
-    - 多种激活函数
-    - Dropout
-    """
     def __init__(
         self,
         input_dim: int,
@@ -85,16 +71,16 @@ class MLP(nn.Module):
         bias: bool = True
     ) -> None:
         super().__init__()
-        
+        # 赋值基础网络配置参数
         self.input_dim = input_dim
         self.output_dim = output_dim
         self.hidden_dims = hidden_dims
-        self.num_layers = len(hidden_dims) + 1  # 隐藏层数量 + 输出层
+        self.num_layers = len(hidden_dims) + 1
         self.weight_noise = weight_noise
         self.dropout = dropout
         self.use_layer_norm = use_layer_norm
-        
-        # 激活函数映射（与原Transformer代码一致）
+
+        # 激活函数映射表 与原生Transformer网络激活函数选型保持一致
         non_linearities = {
             "relu": nn.ReLU,
             "gelu": nn.GELU,
@@ -103,46 +89,34 @@ class MLP(nn.Module):
             "leaky_relu": nn.LeakyReLU
         }
         if non_linearity not in non_linearities:
-            raise ValueError(f"不支持的激活函数: {non_linearity}，可选: {list(non_linearities.keys())}")
+            raise ValueError(f"激活函数仅支持: {list(non_linearities.keys())}")
         self.activation = non_linearities[non_linearity]()
-        
-        # 构建网络层
+
+        # 有序字典构建网络层 保证层的执行顺序严格可控
         layers = OrderedDict()
-        
-        # 输入层 -> 第一层隐藏层
         prev_dim = input_dim
+
+        # 循环构建：输入层 -> 所有隐藏层 每一层由「线性层+可选LN+激活+可选Dropout」组成
         for i, hidden_dim in enumerate(hidden_dims):
-            # 线性层
-            layers[f"linear_{i+1}"] = Linear(
-                prev_dim, hidden_dim, bias=bias, weight_noise=weight_noise
-            )
-            
-            # 可选的层归一化
+            layers[f"linear_{i+1}"] = Linear(prev_dim, hidden_dim, bias=bias, weight_noise=weight_noise)
             if use_layer_norm:
                 layers[f"layernorm_{i+1}"] = LayerNorm(hidden_dim, weight_noise=weight_noise)
-            
-            # 激活函数
             layers[f"activation_{i+1}"] = self.activation
-            
-            # Dropout
             if dropout > 0:
                 layers[f"dropout_{i+1}"] = nn.Dropout(p=dropout)
-            
             prev_dim = hidden_dim
-        
-        # 最后一层：隐藏层 -> 输出层
-        layers[f"linear_output"] = Linear(
-            prev_dim, output_dim, bias=bias, weight_noise=weight_noise
-        )
-        
-        # 构建Sequential网络
+
+        # 构建输出层：最后一层隐藏层 -> 输出层 无激活/归一化/Dropout
+        layers[f"linear_output"] = Linear(prev_dim, output_dim, bias=bias, weight_noise=weight_noise)
+
+        # 封装有序层为Sequential网络
         self.model = nn.Sequential(layers)
-        
-        # 初始化权重
+
+        # 执行权重初始化
         self._init_weights()
     
     def _init_weights(self) -> None:
-        """初始化网络权重（保持与原代码风格一致）"""
+        # 网络权重初始化策略：线性层使用Xavier均匀初始化 偏置项置零 保证训练收敛性
         for m in self.modules():
             if isinstance(m, Linear):
                 nn.init.xavier_uniform_(m.weight)
@@ -150,21 +124,12 @@ class MLP(nn.Module):
                     nn.init.zeros_(m.bias)
     
     def forward(self, x: Tensor) -> Tensor:
-        """
-        前向传播
-        Args:
-            x: 输入张量，shape = (*, input_dim)
-        Returns:
-            输出张量，shape = (*, output_dim)
-        """
-        # 确保输入是float32类型
+        # 前向传播核心逻辑 | 输入shape: (*, input_dim) 输出shape: (*, output_dim)
         x = x.float()
-        
-        # 前向传播
         return self.model(x)
     
     def get_model_config(self) -> dict:
-        """获取模型配置信息"""
+        # 返回模型完整配置信息字典 包含维度/超参/参数量 便于日志打印与配置溯源
         return {
             "input_dim": self.input_dim,
             "output_dim": self.output_dim,
@@ -178,26 +143,26 @@ class MLP(nn.Module):
         }
 
 def parse_args() -> Namespace:
-    """解析命令行参数"""
-    parser = ArgumentParser(description="灵活配置的多层MLP（支持自定义层数和各层维数）")
+    # 命令行参数解析函数 | 分模块配置参数 层级清晰 包含完整的参数校验与默认值
+    parser = ArgumentParser(description="灵活配置的多层感知机(MLP) - 适配算术任务训练")
     
-    # 核心配置
-    parser.add_argument("--input-dim", type=int, required=True, help="输入维度")
-    parser.add_argument("--output-dim", type=int, required=True, help="输出维度")
+    # 核心必选配置 - 网络维度相关
+    parser.add_argument("--input-dim", type=int, required=True, help="模型输入特征维度")
+    parser.add_argument("--output-dim", type=int, required=True, help="模型输出特征维度")
     parser.add_argument("--hidden-dims", type=int, nargs="+", required=True,
-                      help="隐藏层维度列表（如：--hidden-dims 512 256 128 表示3层隐藏层，维数分别为512、256、128）")
+                      help="隐藏层维度列表，空格分隔，如 512 256 128 代表3层隐藏层")
     
-    # 网络配置
+    # 可选网络配置 - 训练策略与结构相关
     parser.add_argument("--non-linearity", type=str, default="relu",
                       choices=["relu", "gelu", "tanh", "sigmoid", "leaky_relu"],
-                      help="激活函数类型")
-    parser.add_argument("--dropout", type=float, default=0.1, help="Dropout概率")
-    parser.add_argument("--weight-noise", type=float, default=0.0, help="权重噪声强度（训练时添加）")
-    parser.add_argument("--use-layer-norm", action="store_true", help="是否使用层归一化")
-    parser.add_argument("--no-bias", action="store_false", dest="bias", help="是否不使用偏置项")
+                      help="网络激活函数类型")
+    parser.add_argument("--dropout", type=float, default=0.1, help="Dropout正则化概率，0则关闭")
+    parser.add_argument("--weight-noise", type=float, default=0.0, help="训练时权重噪声强度，0则关闭")
+    parser.add_argument("--use-layer-norm", action="store_true", help="是否在每层添加层归一化")
+    parser.add_argument("--no-bias", action="store_false", dest="bias", help="是否禁用所有线性层的偏置项")
     
-    # 设备配置
+    # 硬件配置
     parser.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu",
-                      help="运行设备（cuda/cpu）")
+                      help="模型运行设备，自动优先使用cuda")
     
     return parser.parse_args()

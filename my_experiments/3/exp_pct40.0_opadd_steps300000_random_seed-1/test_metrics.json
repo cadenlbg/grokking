@@ -1,0 +1,7 @@
+{
+  "model_type": "transformer",
+  "encoding": "embedding",
+  "test_loss": 0.0024094488471746445,
+  "test_accuracy": 100.0,
+  "test_perplexity": 1.0024123191833496
+}
